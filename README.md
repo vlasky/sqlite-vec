@@ -2,6 +2,12 @@
 
 [![](https://dcbadge.vercel.app/api/server/VCtQ8cGhUs)](https://discord.gg/Ve7WeCJFXk)
 
+> [!NOTE]
+> **Community Fork Notice:** This is a temporary fork of [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec)
+> created to merge pending upstream PRs and provide community support while the original author is unavailable.
+> Once development resumes on the original repository, users are encouraged to switch back.
+> All credit for the original implementation goes to [Alex Garcia](https://github.com/asg017).
+
 An extremely small, "fast enough" vector search SQLite extension that runs
 anywhere! A successor to [`sqlite-vss`](https://github.com/asg017/sqlite-vss)
 
@@ -42,21 +48,66 @@ See <a href="#sponsors">the Sponsors section</a> for more details.
 
 ## Installing
 
-See [Installing `sqlite-vec`](https://alexgarcia.xyz/sqlite-vec/installation.html)
-for more details.
+### From Original Package Registries
+
+The original packages on PyPI, npm, RubyGems, and crates.io are maintained by the original author.
+For the latest features from this fork, see "Installing from This Fork" below.
 
 | Language       | Install                                              | More Info                                                                             |                                                                                                                                                                                                    |
 | -------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Python         | `pip install sqlite-vec`                             | [`sqlite-vec` with Python](https://alexgarcia.xyz/sqlite-vec/python.html)             | [![PyPI](https://img.shields.io/pypi/v/sqlite-vec.svg?color=blue&logo=python&logoColor=white)](https://pypi.org/project/sqlite-vec/)                                                               |
 | Node.js        | `npm install sqlite-vec`                             | [`sqlite-vec` with Node.js](https://alexgarcia.xyz/sqlite-vec/js.html)            | [![npm](https://img.shields.io/npm/v/sqlite-vec.svg?color=green&logo=nodedotjs&logoColor=white)](https://www.npmjs.com/package/sqlite-vec)                                                         |
 | Ruby           | `gem install sqlite-vec`                             | [`sqlite-vec` with Ruby](https://alexgarcia.xyz/sqlite-vec/ruby.html)                 | ![Gem](https://img.shields.io/gem/v/sqlite-vec?color=red&logo=rubygems&logoColor=white)                                                                       |
-| Go             | `go get -u github.com/asg017/sqlite-vec/bindings/go` | [`sqlite-vec` with Go](https://alexgarcia.xyz/sqlite-vec/go.html)                     | [![Go Reference](https://pkg.go.dev/badge/github.com/asg017/sqlite-vec-go-bindings/cgo.svg)](https://pkg.go.dev/github.com/asg017/asg017/sqlite-vec-go-bindings/cgo)                                              |
 | Rust           | `cargo add sqlite-vec`                               | [`sqlite-vec` with Rust](https://alexgarcia.xyz/sqlite-vec/rust.html)                 | [![Crates.io](https://img.shields.io/crates/v/sqlite-vec?logo=rust)](https://crates.io/crates/sqlite-vec)                                                                                          |
 | Datasette      | `datasette install datasette-sqlite-vec`             | [`sqlite-vec` with Datasette](https://alexgarcia.xyz/sqlite-vec/datasette.html)       | [![Datasette](https://img.shields.io/pypi/v/datasette-sqlite-vec.svg?color=B6B6D9&label=Datasette+plugin&logoColor=white&logo=python)](https://datasette.io/plugins/datasette-sqlite-vec)          |
 | rqlite         | `rqlited -extensions-path=sqlite-vec.tar.gz`         | [`sqlite-vec` with rqlite](https://alexgarcia.xyz/sqlite-vec/rqlite.html)                        | [![rqlite](https://img.shields.io/badge/rqlite-sqlite_extensions-blue)](https://rqlite.io/docs/guides/extensions/)           |
 | `sqlite-utils` | `sqlite-utils install sqlite-utils-sqlite-vec`       | [`sqlite-vec` with sqlite-utils](https://alexgarcia.xyz/sqlite-vec/sqlite-utils.html) | [![sqlite-utils](https://img.shields.io/pypi/v/sqlite-utils-sqlite-vec.svg?color=B6B6D9&label=sqlite-utils+plugin&logoColor=white&logo=python)](https://datasette.io/plugins/datasette-sqlite-vec) |
-| Github Release |                                                      |                                                                                       | ![GitHub tag (latest SemVer pre-release)](https://img.shields.io/github/v/tag/asg017/sqlite-vec?color=lightgrey&include_prereleases&label=Github+release&logo=github)                              |
 
+### Installing from This Fork
+
+Install directly from GitHub to get the latest features from this community fork.
+
+#### Available Languages
+
+| Language | Install Latest (main branch) | Install Specific Version |
+|----------|------------------------------|--------------------------|
+| **Go** | `go get github.com/vlasky/sqlite-vec/bindings/go/cgo@main` | `go get github.com/vlasky/sqlite-vec/bindings/go/cgo@v0.2.0-alpha` |
+| **Python** | `pip install git+https://github.com/vlasky/sqlite-vec.git` | `pip install git+https://github.com/vlasky/sqlite-vec.git@v0.2.0-alpha` |
+| **Rust** | `cargo add sqlite-vec --git https://github.com/vlasky/sqlite-vec` | `cargo add sqlite-vec --git https://github.com/vlasky/sqlite-vec --tag v0.2.0-alpha` |
+| **Node.js** | `npm install vlasky/sqlite-vec` | `npm install vlasky/sqlite-vec#v0.2.0-alpha` |
+| **Ruby** | `gem 'sqlite-vec', git: 'https://github.com/vlasky/sqlite-vec'` | `gem 'sqlite-vec', git: 'https://github.com/vlasky/sqlite-vec', tag: 'v0.2.0-alpha'` |
+
+**Python Note:** Requires Python built with loadable extension support (`--enable-loadable-sqlite-extensions`). If you encounter an error about extension support not being available:
+- Use `uv` to create virtual environments (automatically uses system Python which typically has extension support)
+- Or use system Python instead of pyenv/custom builds
+- Or rebuild your Python with `./configure --enable-loadable-sqlite-extensions`
+
+**Available version tags:** See [Releases](https://github.com/vlasky/sqlite-vec/releases)
+
+#### Build from Source
+
+For direct C usage or other languages:
+
+```bash
+git clone https://github.com/vlasky/sqlite-vec.git
+cd sqlite-vec
+./scripts/vendor.sh  # Download vendored dependencies
+make loadable        # Builds dist/vec0.so (or .dylib/.dll)
+```
+
+#### Not Yet Available
+
+- Pre-built binaries via GitHub Releases
+- Package registry publications (PyPI, npm, RubyGems, crates.io)
+- Datasette/sqlite-utils plugins
+
+For these, use the original packages until this fork's CI/CD is configured.
+
+See the [original documentation](https://alexgarcia.xyz/sqlite-vec/installation.html) for detailed usage information.
+
+## What's New in This Fork
+
+See [CHANGELOG.md](CHANGELOG.md) for a complete list of improvements, bug fixes, and merged upstream PRs.
 
 ## Sample usage
 
