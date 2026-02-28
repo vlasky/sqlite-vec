@@ -1,3 +1,10 @@
 fn main() {
-    cc::Build::new().file("sqlite-vec.c").define("SQLITE_CORE", None).compile("sqlite_vec0");
+    let root = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("../..");
+
+    cc::Build::new()
+        .file(root.join("sqlite-vec.c"))
+        .include(&root)
+        .include(root.join("vendor"))
+        .compile("sqlite_vec0");
 }
