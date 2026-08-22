@@ -2,6 +2,35 @@
 
 All notable changes to this community fork will be documented in this file.
 
+## [0.2.5-alpha] - 2026-08-22
+
+### Added
+
+- **MMR (Maximal Marginal Relevance) reranking for KNN queries** ([#6](https://github.com/vlasky/sqlite-vec/pull/6), rebased from [asg017/sqlite-vec#267](https://github.com/asg017/sqlite-vec/pull/267))
+  - New hidden `mmr_lambda` column on vec0 tables: `SELECT rowid, distance FROM v WHERE embedding MATCH ? AND k = 10 AND mmr_lambda = 0.5`
+  - `mmr_lambda` balances relevance against diversity (1.0 = pure relevance, 0.0 = maximum diversity)
+  - Diversity term is normalized for consistent behaviour across all distance metrics
+  - Includes pytest + syrupy snapshot tests
+
+### Fixed
+
+- **Memory leaks in vec0 operations and error paths** ([#7](https://github.com/vlasky/sqlite-vec/issues/7), ports [asg017/sqlite-vec#258](https://github.com/asg017/sqlite-vec/pull/258))
+  - Freed column names and shadow-table names for partition, auxiliary, and metadata columns on table close
+  - Freed SQL strings, statements, blob handles, and KNN buffers on error paths across insert, update, delete, and query code
+  - Freed column names copied into the vtab when a constructor parse fails midway
+  - Verified with macOS `leaks(1)`: 17 leaks (1,168 bytes) before, 0 after, on a workload exercising all affected paths
+- **NaN results from cosine distance on zero-magnitude vectors** ([#8](https://github.com/vlasky/sqlite-vec/issues/8))
+  - `vec_distance_cosine()` now returns NULL when either input has zero magnitude (float, int8, and bit vectors)
+  - `vec_normalize()` now returns NULL for a zero vector instead of a vector of NaNs
+  - vec0 tables with `distance_metric=cosine` now reject zero-magnitude vectors at INSERT and UPDATE time, and reject zero-magnitude query vectors in KNN queries, so NaN can never corrupt KNN orderings (behaviour change: such inserts previously succeeded silently)
+- **Wrong pointer passed to cleanup in `ensure_vector_match` error path** ([#3](https://github.com/vlasky/sqlite-vec/pull/3))
+- **Removed duplicate Rust package from repo root** ([#4](https://github.com/vlasky/sqlite-vec/issues/4)) - `cargo add` from this git repository now resolves the single crate in `bindings/rust/`
+
+### Documentation
+
+- Fixed errors in Ruby documentation examples
+- Documented the exclusive database access requirement for `optimize` and `VACUUM`
+
 ## [0.2.4-alpha] - 2026-01-03
 
 ### Added
