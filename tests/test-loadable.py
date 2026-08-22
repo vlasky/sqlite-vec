@@ -590,6 +590,34 @@ def test_vec_distance_l1():
     )
 
 
+def test_vec_huge_exponent():
+    # exponents large enough to overflow the int accumulator in strtod_c
+    # are clamped and rejected as out of range
+    with pytest.raises(sqlite3.OperationalError, match="JSON parsing error"):
+        db.execute("select vec_length('[1e440444444]')")
+    with pytest.raises(sqlite3.OperationalError, match="JSON parsing error"):
+        db.execute("select vec_length('[1e99999999999999999999]')")
+    assert db.execute("select vec_length('[1e3, 2e-2]')").fetchone()[0] == 2
+
+
+def test_vec0_constructor_truncated_definitions():
+    # incomplete or garbled column definitions must fail cleanly; the token
+    # scanner previously read stale token state when input ended early
+    for construct in [
+        "aa",
+        "aa float",
+        "aa float[",
+        "aa float[4",
+        "bb text partition",
+        "cc text primary",
+        "\xe1aa float[12], bbb int8[6]",
+        "chunk_size",
+        "chunk_size=",
+    ]:
+        with pytest.raises(sqlite3.OperationalError):
+            db.execute(f"create virtual table bad_v using vec0({construct})")
+
+
 def test_vec_reject_nan_inf():
     # NaN and Inf elements break KNN heap/sort invariants, so they are
     # rejected at parse time for both blob and JSON input
