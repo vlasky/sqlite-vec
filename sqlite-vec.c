@@ -626,6 +626,46 @@ static f32 distance_cosine_int8(const void *pA, const void *pB,
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
 }
 
+/**
+ * @brief Returns 1 if the given vector has zero magnitude, 0 otherwise.
+ *
+ * Cosine distance is undefined for zero-magnitude vectors (it divides by the
+ * vector's magnitude), so callers use this to detect them ahead of time.
+ */
+static int vector_is_zero(const void *vector, size_t dimensions,
+                          enum VectorElementType elementType) {
+  switch (elementType) {
+  case SQLITE_VEC_ELEMENT_TYPE_FLOAT32: {
+    const f32 *v = (const f32 *)vector;
+    for (size_t i = 0; i < dimensions; i++) {
+      if (v[i] != 0.0f) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  case SQLITE_VEC_ELEMENT_TYPE_INT8: {
+    const i8 *v = (const i8 *)vector;
+    for (size_t i = 0; i < dimensions; i++) {
+      if (v[i] != 0) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  case SQLITE_VEC_ELEMENT_TYPE_BIT: {
+    const u8 *v = (const u8 *)vector;
+    for (size_t i = 0; i < dimensions / CHAR_BIT; i++) {
+      if (v[i] != 0) {
+        return 0;
+      }
+    }
+    return 1;
+  }
+  }
+  return 0;
+}
+
 static f32 distance_hamming_u8(u8 *a, u8 *b, size_t n) {
   int same = 0;
   for (unsigned long i = 0; i < n; i++) {
@@ -1286,6 +1326,14 @@ static void vec_distance_cosine(sqlite3_context *context, int argc,
     return;
   }
 
+  // Cosine distance is undefined for zero-magnitude vectors. Return NULL
+  // instead of NaN, which poisons distance comparisons and orderings.
+  if (vector_is_zero(a, dimensions, elementType) ||
+      vector_is_zero(b, dimensions, elementType)) {
+    sqlite3_result_null(context);
+    goto finish;
+  }
+
   switch (elementType) {
   case SQLITE_VEC_ELEMENT_TYPE_BIT: {
     f32 result = distance_cosine_bit(a, b, &dimensions);
@@ -1897,6 +1945,14 @@ static void vec_normalize(sqlite3_context *context, int argc,
     norm += v[i] * v[i];
   }
   norm = sqrt(norm);
+  if (norm == 0.0f) {
+    // A zero-magnitude vector cannot be normalized. Return NULL instead of
+    // producing a vector of NaNs.
+    sqlite3_free(out);
+    cleanup(vector);
+    sqlite3_result_null(context);
+    return;
+  }
   for (size_t i = 0; i < dimensions; i++) {
     out[i] = v[i] / norm;
   }
@@ -7729,6 +7785,18 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
     goto cleanup;
   }
 
+  if (vector_column->distance_metric == VEC0_DISTANCE_METRIC_COSINE &&
+      vector_is_zero(queryVector, dimensions, elementType)) {
+    vtab_set_error(
+        &p->base,
+        "A zero-magnitude query vector was provided for the \"%.*s\" column, "
+        "which is not allowed when distance_metric=cosine, as cosine "
+        "distance is undefined for zero vectors.",
+        vector_column->name_length, vector_column->name);
+    rc = SQLITE_ERROR;
+    goto cleanup;
+  }
+
   i64 k = sqlite3_value_int64(argv[k_idx]);
   if (k < 0) {
     vtab_set_error(
@@ -9133,6 +9201,21 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       rc = SQLITE_ERROR;
       goto cleanup;
     }
+
+    if (p->vector_columns[vector_column_idx].distance_metric ==
+            VEC0_DISTANCE_METRIC_COSINE &&
+        vector_is_zero(vectorDatas[vector_column_idx], dimensions,
+                       elementType)) {
+      vtab_set_error(
+          pVTab,
+          "A zero-magnitude vector was provided for the \"%.*s\" column, "
+          "which is not allowed when distance_metric=cosine, as cosine "
+          "distance is undefined for zero vectors.",
+          p->vector_columns[vector_column_idx].name_length,
+          p->vector_columns[vector_column_idx].name);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
   }
 
   // Cannot insert a value in the hidden "distance" column
@@ -9706,6 +9789,18 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
         "Expected %d dimensions but received %d.",
         p->vector_columns[i].name_length, p->vector_columns[i].name,
         p->vector_columns[i].dimensions, dimensions);
+    rc = SQLITE_ERROR;
+    goto cleanup;
+  }
+
+  if (p->vector_columns[i].distance_metric == VEC0_DISTANCE_METRIC_COSINE &&
+      vector_is_zero(vector, dimensions, elementType)) {
+    vtab_set_error(
+        &p->base,
+        "A zero-magnitude vector was provided for the \"%.*s\" column, "
+        "which is not allowed when distance_metric=cosine, as cosine "
+        "distance is undefined for zero vectors.",
+        p->vector_columns[i].name_length, p->vector_columns[i].name);
     rc = SQLITE_ERROR;
     goto cleanup;
   }

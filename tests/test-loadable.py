@@ -443,6 +443,29 @@ def test_vec_distance_cosine():
         abs_tol=1e-6
     )
 
+
+def test_vec_distance_cosine_zero_vector():
+    # cosine distance is undefined for zero-magnitude vectors; NULL is
+    # returned instead of NaN, which poisons distance orderings
+    # https://github.com/vlasky/sqlite-vec/issues/8
+    distance = lambda sql, *args: db.execute(sql, args).fetchone()[0]
+    assert distance("select vec_distance_cosine('[0,0,0]', '[1,2,3]')") is None
+    assert distance("select vec_distance_cosine('[1,2,3]', '[0,0,0]')") is None
+    assert distance("select vec_distance_cosine('[0,0,0]', '[0,0,0]')") is None
+    assert (
+        distance(
+            "select vec_distance_cosine(vec_int8(?), vec_int8(?))",
+            _int8([0, 0]),
+            _int8([1, 2]),
+        )
+        is None
+    )
+    assert (
+        distance("select vec_distance_cosine(vec_bit(?), vec_bit(?))", b"\x00", b"\xff")
+        is None
+    )
+
+
 def test_ensure_vector_match_cleanup_on_second_vector_error():
     """
     Test that ensure_vector_match properly cleans up the first vector
@@ -634,6 +657,11 @@ def test_vec_normalize():
         -0.3162277638912201,
         -0.6324555277824402,
     ]
+
+    # a zero-magnitude vector cannot be normalized; NULL is returned instead
+    # of a vector of NaNs (https://github.com/vlasky/sqlite-vec/issues/8)
+    assert vec_normalize(_f32([0, 0, 0, 0])) is None
+    assert db.execute("select vec_normalize('[0,0,0]')").fetchone()[0] is None
 
 
 def test_vec_slice():
@@ -2557,6 +2585,47 @@ def test_vec0_distance_metric():
         {"rowid": 2, "distance": 1.9838699102401733},
         {"rowid": 1, "distance": 2},
     ]
+
+
+def test_vec0_cosine_zero_vector():
+    # zero-magnitude vectors are rejected on cosine tables, since their cosine
+    # distance is undefined (NaN) and would corrupt KNN orderings
+    # https://github.com/vlasky/sqlite-vec/issues/8
+    db = connect(EXT_PATH)
+    db.execute("create virtual table v using vec0(a float[3] distance_metric=cosine)")
+    db.execute("insert into v(rowid, a) values (1, '[1,0,0]'), (3, '[0.9,0.1,0]')")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=r'A zero-magnitude vector was provided for the "a" column',
+    ):
+        db.execute("insert into v(rowid, a) values (2, '[0,0,0]')")
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=r'A zero-magnitude query vector was provided for the "a" column',
+    ):
+        db.execute("select rowid from v where a match '[0,0,0]' and k = 2").fetchall()
+
+    with pytest.raises(
+        sqlite3.OperationalError,
+        match=r'A zero-magnitude vector was provided for the "a" column',
+    ):
+        db.execute("update v set a = '[0,0,0]' where rowid = 3")
+
+    assert execute_all(
+        db, "select rowid, distance from v where a match '[1,0,0]' and k = 2"
+    ) == [
+        {"rowid": 1, "distance": 0.0},
+        {"rowid": 3, "distance": 0.006116250995546579},
+    ]
+
+    # non-cosine tables still accept zero-magnitude vectors
+    db.execute("create virtual table vl2 using vec0(a float[3])")
+    db.execute("insert into vl2(rowid, a) values (1, '[0,0,0]')")
+    assert execute_all(
+        db, "select rowid, distance from vl2 where a match '[0,0,0]' and k = 1"
+    ) == [{"rowid": 1, "distance": 0.0}]
 
 
 def test_vec0_vacuum():
