@@ -2,6 +2,36 @@
 
 All notable changes to this community fork will be documented in this file.
 
+## [0.2.6-alpha] - 2026-08-22
+
+### Added
+
+- **INSERT OR REPLACE support for vec0 tables** (ports [asg017/sqlite-vec@b95c05b](https://github.com/asg017/sqlite-vec/commit/b95c05b), upstream [#127](https://github.com/asg017/sqlite-vec/issues/127))
+  - Upserts now work with both integer rowids and text primary keys, replacing vectors, metadata, and auxiliary values
+- **Empty-chunk reclamation on DELETE** (ports [asg017/sqlite-vec@cb147c8](https://github.com/asg017/sqlite-vec/commit/cb147c8), upstream [#268](https://github.com/asg017/sqlite-vec/issues/268))
+  - Deleting the last row of a chunk now removes the chunk and its vector/metadata shadow rows immediately, returning disk space without a manual `optimize`
+  - Fixes a shadow-table quirk where the internal SQLite rowid could diverge from the user rowid after chunk delete/recreate cycles, breaking blob lookups
+- **NEON and AVX2 SIMD Hamming distance** (ports [asg017/sqlite-vec@d684178](https://github.com/asg017/sqlite-vec/commit/d684178))
+  - Bit-vector distance uses NEON `vcnt` at 128+ dimensions and AVX2 VPSHUFB popcount at 256+ dimensions
+  - Hardened beyond upstream: AVX2 code requires `__AVX2__` and the Makefile probes the host CPU (`sysctl hw.optional.avx2_0`), so pre-2013 Intel Macs without AVX2 still build and run correctly
+- **libFuzzer targets and nightly fuzz CI** (ports upstream fuzz infrastructure)
+  - 12 fuzz targets covering vector parsing, vec0 operations, scalar functions, metadata columns, shadow-table corruption, and delete completeness
+  - GitHub Actions workflow runs all targets under ASan+UBSan on push to main and nightly
+
+### Fixed
+
+Ports the applicable correctness fixes from upstream v0.1.8 through v0.1.10, most found by upstream's fuzzing suite:
+
+- **Wrong L2 distances for int8 vectors on ARM NEON builds** ([asg017/sqlite-vec@7de925b](https://github.com/asg017/sqlite-vec/commit/7de925b)) - an int16 overflow in the NEON distance loop produced NaN or wrong results for element differences above 181; the default Apple Silicon build was affected
+- **DELETE on long text metadata** ([asg017/sqlite-vec@ee9bd2b](https://github.com/asg017/sqlite-vec/commit/ee9bd2b)) - metadata-clear errors were silently swallowed, and the long-text path returned a status the caller would have treated as an error
+- **NaN and Inf elements now rejected in float32 vector input** ([asg017/sqlite-vec@c4c23bd](https://github.com/asg017/sqlite-vec/commit/c4c23bd)) - NaN elements break KNN ordering invariants
+- **Undefined behaviour fixes** ([asg017/sqlite-vec@cdbc347](https://github.com/asg017/sqlite-vec/commit/cdbc347), [@2f4c2e4](https://github.com/asg017/sqlite-vec/commit/2f4c2e4), [@1b53b94](https://github.com/asg017/sqlite-vec/commit/1b53b94)) - unaligned float/u64 loads from blobs, a one-past-end read in the numpy header tokenizer, an out-of-range float-to-int8 conversion in `vec_quantize_int8` (now clamped, NaN-safe), and an ABI-incompatible cleanup function pointer
+
+### Changed
+
+- SIMD flags are no longer added when cross-compiling for Android (`CC` containing "android")
+- Removed dead typedef macros inherited from sqlite3.c
+
 ## [0.2.5-alpha] - 2026-08-22
 
 ### Added

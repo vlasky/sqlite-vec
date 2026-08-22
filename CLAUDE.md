@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > [!NOTE]
 > This is a community fork of [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) created to merge pending upstream PRs and provide continued support while the original author is unavailable.
 
-`sqlite-vec` is a lightweight, fast vector search SQLite extension written in pure C with no dependencies. It's a pre-v1 project (current: v0.2.5-alpha) that provides vector similarity search capabilities for SQLite databases across all platforms where SQLite runs.
+`sqlite-vec` is a lightweight, fast vector search SQLite extension written in pure C with no dependencies. It's a pre-v1 project (current: v0.2.6-alpha) that provides vector similarity search capabilities for SQLite databases across all platforms where SQLite runs.
 
 Key features:
 - Supports float, int8, and binary vector types via `vec0` virtual tables
@@ -210,6 +210,7 @@ Code uses preprocessor directives to select implementations. Distance calculatio
 - Vector format: JSON arrays `'[1,2,3]'` or raw bytes via helper functions
 
 **Fork-specific notes:**
+- Version v0.2.6-alpha includes: upstream correctness fixes ported from v0.1.8-v0.1.10 (NEON int8 L2 overflow, DELETE on long text metadata, NaN/Inf input rejection, UB fixes), INSERT OR REPLACE support, empty-chunk reclamation on DELETE, NEON/AVX2 SIMD Hamming distance, libFuzzer targets with nightly CI
 - Version v0.2.5-alpha includes: MMR reranking via `mmr_lambda` hidden column (#6), memory leak fixes (#7), NULL/rejection handling for zero-magnitude vectors with cosine distance (#8), duplicate Rust package removal (#4)
 - Version v0.2.4-alpha includes: Lua binding with IEEE 754 compliant float serialization (#237)
 - Version v0.2.3-alpha includes: Android 16KB page support (#254), LDFLAGS support, documentation fixes (#208, #209)
