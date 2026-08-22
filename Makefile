@@ -55,6 +55,10 @@ ifndef OMIT_SIMD
 	ifeq ($(findstring android,$(CC)),)
 	ifeq ($(shell uname -sm),Darwin x86_64)
 	CFLAGS += -mavx -DSQLITE_VEC_ENABLE_AVX
+	# pre-2013 Intel Macs support AVX but not AVX2, so check the host CPU
+	ifeq ($(shell sysctl -n hw.optional.avx2_0 2>/dev/null),1)
+	CFLAGS += -mavx2
+	endif
 	endif
 	ifeq ($(shell uname -sm),Darwin arm64)
 	CFLAGS += -mcpu=apple-m1 -DSQLITE_VEC_ENABLE_NEON
