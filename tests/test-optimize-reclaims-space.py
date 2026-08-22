@@ -62,10 +62,11 @@ def test_optimize_reclaims_pages_with_autovacuum_incremental(tmp_path):
     db.execute("PRAGMA incremental_vacuum")
     chunk_rows_after_optimize = pragma_int(db, "select count(*) from v_chunks")
 
-    # Initially 256 rows at chunk_size 64 -> 4 chunk rows. After deleting half,
-    # optimize should compact to 2 chunk rows.
+    # Initially 256 rows at chunk_size 64 -> 4 chunk rows. Deleting the upper
+    # half empties the last two chunks, which DELETE now reclaims immediately;
+    # optimize has nothing further to compact.
     assert chunk_rows_after_insert == 4
-    assert chunk_rows_after_delete == 4
+    assert chunk_rows_after_delete == 2
     assert chunk_rows_after_optimize == 2
 
 
