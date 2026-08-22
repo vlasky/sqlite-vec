@@ -51,11 +51,14 @@ PYTHON=python3
 endif
 
 ifndef OMIT_SIMD
+	# host-based detection is wrong when cross-compiling, e.g. for Android
+	ifeq ($(findstring android,$(CC)),)
 	ifeq ($(shell uname -sm),Darwin x86_64)
 	CFLAGS += -mavx -DSQLITE_VEC_ENABLE_AVX
 	endif
 	ifeq ($(shell uname -sm),Darwin arm64)
 	CFLAGS += -mcpu=apple-m1 -DSQLITE_VEC_ENABLE_NEON
+	endif
 	endif
 endif
 
