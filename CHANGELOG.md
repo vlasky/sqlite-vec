@@ -20,6 +20,12 @@ All notable changes to this community fork will be documented in this file.
 
 ### Fixed
 
+Found by this fork's own first fuzzing runs:
+
+- **Use-after-free in vec0 constructor parsing** - 21 token-scanner guards used `&&` where `||` was intended, so truncated or garbled column definitions could read stale token state pointing at freed memory
+- **Signed integer overflow in JSON number parsing** - exponents like `1e440444444` overflowed the parser's int accumulator; now clamped and rejected as out of range
+- **`vec_npy_each` hang and buffer over-read** - numpy headers missing mandatory keys left the element count uninitialized, iterating effectively unbounded rows (a 14-byte input hung for 29 minutes), and a `"False"` comparison could read past the end of the header buffer
+
 Ports the applicable correctness fixes from upstream v0.1.8 through v0.1.10, most found by upstream's fuzzing suite:
 
 - **Wrong L2 distances for int8 vectors on ARM NEON builds** ([asg017/sqlite-vec@7de925b](https://github.com/asg017/sqlite-vec/commit/7de925b)) - an int16 overflow in the NEON distance loop produced NaN or wrong results for element differences above 181; the default Apple Silicon build was affected
