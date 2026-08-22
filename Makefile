@@ -31,7 +31,10 @@ ifdef CONFIG_DARWIN
 LOADABLE_EXTENSION=dylib
 # Let unresolved SQLite symbols resolve against host at load time
 # This is standard for SQLite loadable extensions on macOS.
+# Skipped for cross-compilers like cosmocc that reject the flag.
+ifeq ($(findstring cosmocc,$(CC)),)
 CFLAGS += -undefined dynamic_lookup
+endif
 endif
 
 ifdef CONFIG_LINUX

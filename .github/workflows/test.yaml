@@ -217,6 +217,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ncruces/go-sqlite3
+          # the patch tracks this tag's layout; v0.32.0+ removed sqlite3/main.c
+          ref: v0.31.1
           path: go-sqlite3
       - run: git apply ../bindings/go/ncruces/go-sqlite3.patch
         working-directory: go-sqlite3/
