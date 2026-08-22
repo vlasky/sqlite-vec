@@ -1,5 +1,5 @@
 diff --git a/embed/build.sh b/embed/build.sh
-index 4b55372..4e4c3ca 100755
+index d768705..edbcc67 100755
 --- a/embed/build.sh
 +++ b/embed/build.sh
 @@ -25,6 +25,7 @@ trap 'rm -f sqlite3.tmp' EXIT
@@ -11,7 +11,7 @@ index 4b55372..4e4c3ca 100755
  
  "$BINARYEN/wasm-ctor-eval" -g -c _initialize sqlite3.wasm -o sqlite3.tmp
 diff --git a/sqlite3/main.c b/sqlite3/main.c
-index dbba2fc..8a8dbb3 100644
+index 62eb1aa..de2e03e 100644
 --- a/sqlite3/main.c
 +++ b/sqlite3/main.c
 @@ -18,6 +18,7 @@
@@ -19,12 +19,13 @@ index dbba2fc..8a8dbb3 100644
  #include "vfs.c"
  #include "vtab.c"
 +#include "../../sqlite-vec.c"
- // Libc
- #include "libc.c"
- #include "malloc_sbrk.c"
-@@ -33,4 +34,5 @@ void _initialize() {
+ 
+ __attribute__((constructor)) void init() {
+   sqlite3_initialize();
+@@ -29,4 +30,5 @@ __attribute__((constructor)) void init() {
    sqlite3_auto_extension((void (*)(void))sqlite3_spellfix_init);
    sqlite3_auto_extension((void (*)(void))sqlite3_uint_init);
    sqlite3_auto_extension((void (*)(void))sqlite3_time_init);
 +  sqlite3_auto_extension((void (*)(void))sqlite3_vec_init);
  }
+\ No newline at end of file
