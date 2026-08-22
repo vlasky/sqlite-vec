@@ -1,14 +1,9 @@
 name: Deploy Site
+# Manual-only: this fork does not have GitHub Pages enabled, so pushes
+# to main would fail the deploy. Run via workflow_dispatch after
+# enabling Pages (Settings > Pages > Source: GitHub Actions).
 on:
   workflow_dispatch: {}
-  push:
-    branches:
-      - main
-    paths:
-      - "site/**"
-      - ".github/**"
-      - "VERSION"
-      - "reference.yaml"
 jobs:
   deploy:
     runs-on: ubuntu-latest
