@@ -317,13 +317,15 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
     pVect1 += 8;
     pVect2 += 8;
 
-    // widen to protect against overflow
+    // widen i8 to i16 for subtraction
     int16x8_t v1_wide = vmovl_s8(v1);
     int16x8_t v2_wide = vmovl_s8(v2);
-
     int16x8_t diff = vsubq_s16(v1_wide, v2_wide);
-    int16x8_t squared_diff = vmulq_s16(diff, diff);
-    int32x4_t sum = vpaddlq_s16(squared_diff);
+
+    // widening multiply: diff can be up to 255, so diff*diff overflows i16
+    int32x4_t sq_lo = vmull_s16(vget_low_s16(diff), vget_low_s16(diff));
+    int32x4_t sq_hi = vmull_s16(vget_high_s16(diff), vget_high_s16(diff));
+    int32x4_t sum = vaddq_s32(sq_lo, sq_hi);
 
     sum_scalar += vgetq_lane_s32(sum, 0) + vgetq_lane_s32(sum, 1) +
                   vgetq_lane_s32(sum, 2) + vgetq_lane_s32(sum, 3);
@@ -698,10 +700,14 @@ static unsigned int __builtin_popcountl(u64 n) {
 #endif
 #endif
 
-static f32 distance_hamming_u64(u64 *a, u64 *b, size_t n) {
+static f32 distance_hamming_u64(const u8 *a, const u8 *b, size_t n) {
   int same = 0;
   for (unsigned long i = 0; i < n; i++) {
-    same += __builtin_popcountl(a[i] ^ b[i]);
+    // memcpy loads: the blob pointers may not be u64-aligned
+    u64 va, vb;
+    memcpy(&va, a + i * sizeof(u64), sizeof(u64));
+    memcpy(&vb, b + i * sizeof(u64), sizeof(u64));
+    same += __builtin_popcountl(va ^ vb);
   }
   return (f32)same;
 }
@@ -718,7 +724,8 @@ static f32 distance_hamming(const void *a, const void *b, const void *d) {
   size_t dimensions = *((size_t *)d);
 
   if ((dimensions % 64) == 0) {
-    return distance_hamming_u64((u64 *)a, (u64 *)b, dimensions / 8 / CHAR_BIT);
+    return distance_hamming_u64((const u8 *)a, (const u8 *)b,
+                                dimensions / 8 / CHAR_BIT);
   }
   return distance_hamming_u8((u8 *)a, (u8 *)b, dimensions / CHAR_BIT);
 }
@@ -841,9 +848,9 @@ char *type_name(int type) {
   return "";
 }
 
-typedef void (*fvec_cleanup)(f32 *vector);
+typedef void (*fvec_cleanup)(void *vector);
 
-void fvec_cleanup_noop(f32 *_) { UNUSED_PARAMETER(_); }
+void fvec_cleanup_noop(void *_) { UNUSED_PARAMETER(_); }
 
 static int fvec_from_value(sqlite3_value *value, f32 **vector,
                            size_t *dimensions, fvec_cleanup *cleanup,
@@ -863,9 +870,25 @@ static int fvec_from_value(sqlite3_value *value, f32 **vector,
                                sizeof(f32), bytes);
       return SQLITE_ERROR;
     }
-    *vector = (f32 *)blob;
-    *dimensions = bytes / sizeof(f32);
-    *cleanup = fvec_cleanup_noop;
+    // copy rather than alias the blob: it may not be f32-aligned
+    f32 *buf = sqlite3_malloc(bytes);
+    if (!buf) {
+      *pzErr = sqlite3_mprintf("out of memory");
+      return SQLITE_NOMEM;
+    }
+    memcpy(buf, blob, bytes);
+    size_t n = bytes / sizeof(f32);
+    for (size_t i = 0; i < n; i++) {
+      if (isnan(buf[i]) || isinf(buf[i])) {
+        *pzErr = sqlite3_mprintf("invalid float32 vector: element %d is %s",
+                                 (int)i, isnan(buf[i]) ? "NaN" : "Inf");
+        sqlite3_free(buf);
+        return SQLITE_ERROR;
+      }
+    }
+    *vector = buf;
+    *dimensions = n;
+    *cleanup = sqlite3_free;
     return SQLITE_OK;
   }
 
@@ -932,6 +955,12 @@ static int fvec_from_value(sqlite3_value *value, f32 **vector,
       }
 
       f32 res = (f32)result;
+      if (isnan(res) || isinf(res)) {
+        sqlite3_free(x.z);
+        *pzErr = sqlite3_mprintf("invalid float32 vector: element %d is %s",
+                                 (int)x.length, isnan(res) ? "NaN" : "Inf");
+        return SQLITE_ERROR;
+      }
       array_append(&x, (const void *)&res);
 
       offset += (endptr - ptr);
@@ -955,7 +984,7 @@ static int fvec_from_value(sqlite3_value *value, f32 **vector,
     if (x.length > 0) {
       *vector = (f32 *)x.z;
       *dimensions = x.length;
-      *cleanup = (fvec_cleanup)sqlite3_free;
+      *cleanup = sqlite3_free;
       return SQLITE_OK;
     }
     sqlite3_free(x.z);
@@ -1129,7 +1158,7 @@ int vector_from_value(sqlite3_value *value, void **vector, size_t *dimensions,
   if (!subtype || (subtype == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) ||
       (subtype == JSON_SUBTYPE)) {
     int rc = fvec_from_value(value, (f32 **)vector, dimensions,
-                             (fvec_cleanup *)cleanup, pzErrorMessage);
+                             cleanup, pzErrorMessage);
     if (rc == SQLITE_OK) {
       *element_type = SQLITE_VEC_ELEMENT_TYPE_FLOAT32;
     }
@@ -1614,7 +1643,10 @@ static void vec_quantize_int8(sqlite3_context *context, int argc,
   }
   f32 step = (1.0 - (-1.0)) / 255;
   for (size_t i = 0; i < dimensions; i++) {
-    out[i] = ((srcVector[i] - (-1.0)) / step) - 128;
+    double val = ((srcVector[i] - (-1.0)) / step) - 128;
+    if (!(val <= 127.0)) val = 127.0; /* also clamps NaN */
+    if (!(val >= -128.0)) val = -128.0;
+    out[i] = (i8)val;
   }
 
   sqlite3_result_blob(context, out, dimensions * sizeof(i8), sqlite3_free);
@@ -2862,7 +2894,7 @@ int npy_token_next(unsigned char *start, unsigned char *end,
         }
         ptr++;
       }
-      if ((*ptr) != '\'') {
+      if (ptr >= end || (*ptr) != '\'') {
         return VEC0_TOKEN_RESULT_ERROR;
       }
       out->start = start;
@@ -9636,12 +9668,13 @@ int vec0Update_Delete_ClearMetadata(vec0_vtab *p, int metadata_idx, i64 rowid, i
         }
         sqlite3_bind_int64(stmt, 1, rowid);
         rc = sqlite3_step(stmt);
+        sqlite3_finalize(stmt);
         if(rc != SQLITE_DONE) {
-          sqlite3_finalize(stmt);
           rc = SQLITE_ERROR;
           goto done;
         }
-        sqlite3_finalize(stmt);
+        // normalize SQLITE_DONE, the epilogue treats non-OK as an error
+        rc = SQLITE_OK;
       }
       break;
     }
@@ -9719,6 +9752,9 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
   // 6. delete metadata
   for(int i = 0; i < p->numMetadataColumns; i++) {
     rc = vec0Update_Delete_ClearMetadata(p, i, rowid, chunk_id, chunk_offset);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
   }
 
   return SQLITE_OK;

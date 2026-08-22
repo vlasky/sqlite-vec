@@ -287,6 +287,35 @@ def test_renames(db, snapshot):
     assert exec(db, "select * from v1")["rows"] == result["rows"]
 
 
+def test_delete_by_metadata_with_long_text(db):
+    # text values longer than the 12-byte inline buffer are stored in the
+    # _metadatatextNN shadow table; deleting them exercises the long-text
+    # DELETE path in vec0Update_Delete_ClearMetadata
+    db.execute(
+        "create virtual table v using vec0(tag text, embedding float[4], chunk_size=8)"
+    )
+    for i in range(6):
+        db.execute(
+            "insert into v(tag, embedding) values (?, zeroblob(16))",
+            [f"long_text_value_{i}"],
+        )
+    for i in range(4):
+        db.execute(
+            "insert into v(tag, embedding) values (?, zeroblob(16))",
+            ["long_text_value_0"],
+        )
+    assert db.execute("select count(*) from v").fetchone()[0] == 10
+
+    db.execute("delete from v where tag = 'long_text_value_0'")
+    assert (
+        db.execute(
+            "select count(*) from v where tag = 'long_text_value_0'"
+        ).fetchone()[0]
+        == 0
+    )
+    assert db.execute("select count(*) from v").fetchone()[0] == 5
+
+
 def test_knn(db, snapshot):
     db.execute(
         "create virtual table v using vec0(vector float[1], name text, chunk_size=8)"
