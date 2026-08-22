@@ -518,6 +518,30 @@ static u8 hamdist_table[256] = {
   4, 5, 5, 6, 5, 6, 6, 7, 3, 4, 4, 5, 4, 5, 5, 6, 4, 5, 5, 6, 5, 6, 6, 7,
   4, 5, 5, 6, 5, 6, 6, 7, 5, 6, 6, 7, 6, 7, 7, 8};
 
+#ifdef _MSC_VER
+#if !defined(__clang__) && (defined(_M_ARM) || defined(_M_ARM64))
+// From
+// https://github.com/ngtcp2/ngtcp2/blob/b64f1e77b5e0d880b93d31f474147fae4a1d17cc/lib/ngtcp2_ringbuf.c,
+// line 34-43
+static unsigned int __builtin_popcountl(u64 x) {
+  unsigned int c = 0;
+  for (; x; ++c) {
+    x &= x - 1;
+  }
+  return c;
+}
+#else
+#include <intrin.h>
+#ifdef _WIN64
+#define __builtin_popcountl __popcnt64
+#else
+static unsigned int __builtin_popcountl(u64 n) {
+  return __popcnt((u32)n) + __popcnt((u32)(n >> 32));
+}
+#endif
+#endif
+#endif
+
 static f32 distance_cosine_bit_u64(u64 *a, u64 *b, size_t n) {
   f32 dot = 0;
   f32 aMag = 0;
@@ -640,30 +664,6 @@ static f32 distance_hamming_u8(u8 *a, u8 *b, size_t n) {
   }
   return (f32)same;
 }
-
-#ifdef _MSC_VER
-#if !defined(__clang__) && (defined(_M_ARM) || defined(_M_ARM64))
-// From
-// https://github.com/ngtcp2/ngtcp2/blob/b64f1e77b5e0d880b93d31f474147fae4a1d17cc/lib/ngtcp2_ringbuf.c,
-// line 34-43
-static unsigned int __builtin_popcountl(u64 x) {
-  unsigned int c = 0;
-  for (; x; ++c) {
-    x &= x - 1;
-  }
-  return c;
-}
-#else
-#include <intrin.h>
-#ifdef _WIN64
-#define __builtin_popcountl __popcnt64
-#else
-static unsigned int __builtin_popcountl(u64 n) {
-  return __popcnt((u32)n) + __popcnt((u32)(n >> 32));
-}
-#endif
-#endif
-#endif
 
 #ifdef SQLITE_VEC_ENABLE_NEON
 static f32 distance_hamming_neon(const u8 *a, const u8 *b, size_t n_bytes) {
@@ -2983,7 +2983,7 @@ int npy_token_next(unsigned char *start, unsigned char *end,
       out->end = ++ptr;
       out->token_type = NPY_TOKEN_TYPE_STRING;
       return VEC0_TOKEN_RESULT_SOME;
-    } else if (curr == 'F' &&
+    } else if (curr == 'F' && (size_t)(end - ptr) >= strlen("False") &&
                strncmp((char *)ptr, "False", strlen("False")) == 0) {
       out->start = ptr;
       out->end = (ptr + (int)strlen("False"));
@@ -3037,6 +3037,9 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
   struct NpyScanner scanner;
   struct NpyToken token;
   int rc;
+  int sawDescr = 0;
+  int sawFortranOrder = 0;
+  int sawShape = 0;
   npy_scanner_init(&scanner, header, headerLength);
 
   if (npy_scanner_next(&scanner, &token) != VEC0_TOKEN_RESULT_SOME ||
@@ -3085,6 +3088,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
         return SQLITE_ERROR;
       }
       *out_element_type = SQLITE_VEC_ELEMENT_TYPE_FLOAT32;
+      sawDescr = 1;
     } else if (strncmp((char *)key, "'fortran_order'",
                        strlen("'fortran_order'")) == 0) {
       rc = npy_scanner_next(&scanner, &token);
@@ -3096,6 +3100,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
         return SQLITE_ERROR;
       }
       *fortran_order = 0;
+      sawFortranOrder = 1;
     } else if (strncmp((char *)key, "'shape'", strlen("'shape'")) == 0) {
       // "(xxx, xxx)" OR (xxx,)
       size_t first;
@@ -3148,6 +3153,7 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
         vtab_set_error(pVTab, NPY_PARSE_ERROR "unknown type in shape value");
         return SQLITE_ERROR;
       }
+      sawShape = 1;
     } else {
       vtab_set_error(pVTab, NPY_PARSE_ERROR "unknown key in numpy header");
       return SQLITE_ERROR;
@@ -3159,6 +3165,14 @@ int parse_npy_header(sqlite3_vtab *pVTab, const unsigned char *header,
       vtab_set_error(pVTab, NPY_PARSE_ERROR "unknown extra token after value");
       return SQLITE_ERROR;
     }
+  }
+
+  // all three keys are mandatory in the npy format; without them the out
+  // parameters would be left uninitialized
+  if (!sawDescr || !sawFortranOrder || !sawShape) {
+    vtab_set_error(pVTab, NPY_PARSE_ERROR
+                   "numpy header missing 'descr', 'fortran_order', or 'shape'");
+    return SQLITE_ERROR;
   }
 
   return SQLITE_OK;
