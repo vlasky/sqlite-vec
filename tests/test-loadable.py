@@ -20,17 +20,17 @@ SUPPORTS_VTAB_IN = sqlite3.sqlite_version_info[1] >= 38
 SUPPORTS_VTAB_LIMIT = sqlite3.sqlite_version_info[1] >= 41
 
 
-def bitmap_full(n: int) -> bytearray:
+def bitmap_full(n: int) -> bytes:
     assert (n % 8) == 0
     return bytes([0xFF] * int(n / 8))
 
 
-def bitmap_zerod(n: int) -> bytearray:
+def bitmap_zerod(n: int) -> bytes:
     assert (n % 8) == 0
     return bytes([0x00] * int(n / 8))
 
 
-def f32_zerod(n: int) -> bytearray:
+def f32_zerod(n: int) -> bytes:
     return bytes([0x00, 0x00, 0x00, 0x00] * int(n))
 
 
@@ -406,11 +406,13 @@ def test_vec_distance_cosine():
         f"select vec_distance_cosine({a}, {b})", args
     ).fetchone()[0]
 
-    def check(a, b, dtype=np.float32):
+    def check(a, b, dtype: type = np.float32):
         if dtype == np.float32:
             transform = "?"
         elif dtype == np.int8:
             transform = "vec_int8(?)"
+        else:
+            raise ValueError(f"unsupported dtype: {dtype}")
         a = np.array(a, dtype=dtype)
         b = np.array(b, dtype=dtype)
 
@@ -518,11 +520,13 @@ def test_vec_distance_l1():
         f"select vec_distance_l1({a}, {b})", args
     ).fetchone()[0]
 
-    def check(a, b, dtype=np.float32):
+    def check(a, b, dtype: type = np.float32):
         if dtype == np.float32:
             transform = "?"
         elif dtype == np.int8:
             transform = "vec_int8(?)"
+        else:
+            raise ValueError(f"unsupported dtype: {dtype}")
 
         a_sql_t = np.array(a, dtype=dtype)
         b_sql_t = np.array(b, dtype=dtype)
@@ -580,11 +584,13 @@ def test_vec_distance_l2():
         f"select vec_distance_l2({a}, {b})", args
     ).fetchone()[0]
 
-    def check(a, b, dtype=np.float32):
+    def check(a, b, dtype: type = np.float32):
         if dtype == np.float32:
             transform = "?"
         elif dtype == np.int8:
             transform = "vec_int8(?)"
+        else:
+            raise ValueError(f"unsupported dtype: {dtype}")
 
         a_sql_t = np.array(a, dtype=dtype)
         b_sql_t = np.array(b, dtype=dtype)
@@ -1620,7 +1626,7 @@ def test_vec0_text_pk():
 
     if SUPPORTS_VTAB_IN:
         assert re.match(
-            ("SCAN (TABLE )?t VIRTUAL TABLE INDEX 0:3{___}___\[___"),
+            (r"SCAN (TABLE )?t VIRTUAL TABLE INDEX 0:3{___}___\[___"),
             explain_query_plan(
                 "select t_id, distance from t where aaa match '' and k = 3 and t_id in ('t_2', 't_3')",
                 db=db,
@@ -1720,7 +1726,7 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def _raises(message, error=sqlite3.OperationalError):
+def _raises(message, error: type[Exception] = sqlite3.OperationalError):
     with pytest.raises(error, match=re.escape(message)):
         yield
 
@@ -2274,9 +2280,9 @@ def np_topk(
     return top_indices, distances[top_indices]
 
 
-# import faiss
 @pytest.mark.skip(reason="TODO")
 def test_correctness_npy():
+    faiss = pytest.importorskip("faiss")
     db = connect(EXT_PATH)
     np.random.seed(420 + 1 + 2)
     mat = np.random.uniform(low=-1.0, high=1.0, size=(10000, 24)).astype(np.float32)
