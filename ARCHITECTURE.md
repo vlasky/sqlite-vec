@@ -140,14 +140,19 @@ hidden parameter columns declared after `k` (`mmr_lambda` among them). When one
 of them reads another table of the query, SQLite also weighs plans that scan
 `vec0` before that table, in which the argument is unusable. `xBestIndex`
 returns `SQLITE_CONSTRAINT` for such a plan (`vec0_constraint_is_knn_argument`),
-so the planner takes one that gives `vec0` every argument.
+so the planner takes one that gives `vec0` every argument, unless a usable
+constraint supplies the same argument, as `k = 2` does beside `k = w.n`
+(`vec0_knn_argument_is_supplied`). SQLite accepts `SQLITE_CONSTRAINT` from
+`xBestIndex` from 3.26.0 on, so on an older library every plan is kept, as
+before. A query in which the table that supplies an argument itself reads `vec0`
+(a cycle, such as `v.k = j.value` with `j` a `json_each` over a column of `v`)
+has no plan at all and fails with "no query solution".
 
-Filters on rowid, partition key, metadata and distance columns are left to the
-plan. A filter whose value comes from another table is unusable in a plan that
-scans `vec0` first, and SQLite takes such a plan whenever the query allows it,
-in either FROM order, applying the filter to the k rows `vec0` returns. That
-keeps a lookup join at k rows, and `vec0` cannot tell a lookup join from a
-filter join: in
+Filters on rowid `IN (...)`, partition key, metadata and distance columns are
+left to the plan. A filter whose value comes from another table is unusable in a
+plan that scans `vec0` first, and SQLite can take such a plan in either FROM
+order, applying the filter to the k rows `vec0` returns. That keeps a lookup
+join at k rows, and `vec0` cannot tell a lookup join from a filter join: in
 
 ```sql
 select v.rowid, c.name from v join categories c on c.id = v.category
@@ -161,6 +166,17 @@ first, or `vec0` is on the right of a `LEFT JOIN` with the filter in `ON`, has
 the filter usable in every plan, so `vec0` runs once per row of that table and
 applies the filter before the k. So does a correlated subquery, whose outer
 columns are constants to `vec0`.
+
+Which plan a lookup join gets is the planner's choice, made from costs and
+statistics, not a guarantee: after `ANALYZE`, a small `categories` table can
+become the outer loop of the query above, so that `vec0` runs once per category
+and the join returns 10 rows per category. A query that needs a global k should
+run the KNN in a subquery or CTE and join its result.
+
+A scalar `rowid = ?` beside a MATCH is not one of the filters above: only
+`rowid IN (...)` is pushed into candidate selection, and `rowid = ?` serves the
+point plan alone, so with a MATCH and `k` the k nearest rows are selected first
+and SQLite then keeps only the one with that rowid, if it is among them.
 
 #### `VEC0_IDXSTR_KIND_KNN_MATCH` (`'{'`)
 
