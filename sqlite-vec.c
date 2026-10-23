@@ -273,7 +273,7 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
   size_t qty = *((size_t *)qty_ptr);
 
   const i8 *pEnd1 = pVect1 + qty;
-  i32 sum_scalar = 0;
+  i64 sum_scalar = 0;
 
   while (pVect1 < pEnd1 - 7) {
     // loading 8 at a time
@@ -304,7 +304,7 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
     pVect2++;
   }
 
-  return sqrtf(sum_scalar);
+  return sqrt((double)sum_scalar);
 }
 
 static i32 l1_int8_neon(const void *pVect1v, const void *pVect2v,
