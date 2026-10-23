@@ -42,9 +42,9 @@ typedef size_t usize;
 #define COMPILER_SUPPORTS_VTAB_IN 1
 #endif
 
-// sqlite3_value_encoding() was added in SQLite version 3.41 (2023-02-21)
-// https://www.sqlite.org/changes.html#version_3_41_0
-#if SQLITE_VERSION_NUMBER >= 3041000
+// sqlite3_value_encoding() was added in SQLite version 3.40 (2022-11-16)
+// https://www.sqlite.org/changes.html#version_3_40_0
+#if SQLITE_VERSION_NUMBER >= 3040000
 #define COMPILER_SUPPORTS_VALUE_ENCODING 1
 #endif
 
@@ -5010,7 +5010,7 @@ void vec0_cursor_clear(vec0_cursor *pCur) {
 // Reads the database's text encoding into *pEncoding: SQLITE_UTF8,
 // SQLITE_UTF16LE or SQLITE_UTF16BE. Every attached database shares the main
 // database's encoding. SQLite converts a string literal to the database's
-// encoding when it runs the statement, so on SQLite 3.41+
+// encoding when it runs the statement, so on SQLite 3.40+
 // sqlite3_value_encoding() of one reports it without a PRAGMA, which an
 // application's authorizer may deny. Older SQLite reads PRAGMA encoding, which
 // names it "UTF-8", "UTF-16le" or "UTF-16be". A build with SQLITE_OMIT_UTF16
@@ -5023,7 +5023,7 @@ static int vec0_read_text_encoding(sqlite3 *db, int *pEncoding) {
   sqlite3_stmt *stmt = NULL;
   int rc;
 #if COMPILER_SUPPORTS_VALUE_ENCODING
-  if (sqlite3_libversion_number() >= 3041000) {
+  if (sqlite3_libversion_number() >= 3040000) {
     rc = sqlite3_prepare_v2(db, "SELECT 'a'", -1, &stmt, NULL);
     if (rc == SQLITE_OK) {
       rc = sqlite3_step(stmt);
@@ -5057,6 +5057,10 @@ static int vec0_read_text_encoding(sqlite3 *db, int *pEncoding) {
   } else if (rc == SQLITE_DONE) {
     // A host built with SQLITE_OMIT_COMPILEOPTION_DIAGS gives an extension no
     // sqlite3_compileoption_used(), so it cannot confirm SQLITE_OMIT_UTF16
+#if defined(SQLITE_CORE) && defined(SQLITE_OMIT_UTF16)
+    // the core this file is built into has no UTF-16, so no row means UTF-8
+    rc = SQLITE_OK;
+#else
 #ifndef SQLITE_CORE
     int canAsk = sqlite3_api->compileoption_used != NULL;
 #else
@@ -5064,6 +5068,7 @@ static int vec0_read_text_encoding(sqlite3 *db, int *pEncoding) {
 #endif
     rc = canAsk && sqlite3_compileoption_used("OMIT_UTF16") ? SQLITE_OK
                                                             : SQLITE_EMPTY;
+#endif
   }
   sqlite3_finalize(stmt);
   return rc;
@@ -6410,7 +6415,9 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
 
   done:
     if(idxStr) {
-      sqlite3_str_finish(idxStr);
+      // an error exit leaves the partly built string to free; on success
+      // idxStr was handed to pIdxInfo and set to NULL
+      sqlite3_free(sqlite3_str_finish(idxStr));
     }
     return rc;
 }
@@ -8449,7 +8456,10 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
           int n = sqlite3_value_bytes(entry);
 
           struct Vec0MetadataInTextEntry entry;
-          entry.zString = sqlite3_mprintf("%.*s", n, s);
+          // copied byte for byte, since the text may contain NUL bytes and
+          // the comparison reads all n of them
+          // s is NULL when SQLite could not convert the value to text
+          entry.zString = s ? sqlite3_malloc(n + 1) : NULL;
           if(!entry.zString) {
             rc = SQLITE_NOMEM;
             // Clean up already-added text entries
@@ -8459,6 +8469,8 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
             array_cleanup(&item.array);
             goto cleanup;
           }
+          memcpy(entry.zString, s, n);
+          entry.zString[n] = '\0';
           entry.n = n;
           rc = array_append(&item.array, &entry);
           if (rc != SQLITE_OK) {

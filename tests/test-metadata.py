@@ -1200,6 +1200,42 @@ def test_vtab_in_long_text(db, snapshot):
     ) == snapshot(name="all")
 
 
+def test_vtab_in_text_with_embedded_nul(db):
+    # an IN value is copied byte for byte: a NUL inside it used to end the
+    # copy while the comparison still read every byte of the bound length
+    db.execute("create virtual table v using vec0(vector float[1], t text)")
+    db.execute("create table plain(id integer primary key, t text)")
+    rows = [
+        (1, "a\0" + "x" * 62),
+        (2, "a\0"),
+        (3, "a"),
+        (4, "A\0" + "x" * 62),
+        (5, "a\0" + "x" * 62 + "  "),
+        (6, "other"),
+    ]
+    for rowid, t in rows:
+        db.execute(
+            "insert into v(rowid, vector, t) values (?, printf('[%d]', ?), ?)",
+            [rowid, rowid, t],
+        )
+        db.execute("insert into plain values (?, ?)", [rowid, t])
+
+    def rowids(sql, parameters):
+        return sorted(row[0] for row in db.execute(sql, parameters))
+
+    for collation in ["", " collate nocase", " collate rtrim"]:
+        for value in ["a\0" + "x" * 62, "a\0", "a", "A\0" + "x" * 61, "a\0 "]:
+            where = f"t{collation} in (?, 'nomatch')"
+            want = rowids(f"select id from plain where {where}", [value])
+            assert (
+                rowids(
+                    f"select rowid from v where vector match '[0]' and k = 10 and {where}",
+                    [value],
+                )
+                == want
+            ), (collation, value)
+
+
 def test_idxstr(db, snapshot):
     db.execute(
         """
@@ -1576,7 +1612,7 @@ def test_knn_text_filters_in_utf16_database(encoding):
 
 def test_knn_text_filters_when_the_authorizer_denies_pragmas(tmp_path):
     # vec0 reads the database's text encoding when it opens a table. SQLite
-    # 3.41+ needs no PRAGMA for that, so a connection whose authorizer denies
+    # 3.40+ needs no PRAGMA for that, so a connection whose authorizer denies
     # PRAGMAs opens the table and keeps its text range filters; older SQLite
     # reads PRAGMA encoding, so the table fails to open instead of comparing
     # text in a guessed encoding.
@@ -1598,7 +1634,7 @@ def test_knn_text_filters_when_the_authorizer_denies_pragmas(tmp_path):
         )
     )
     query = "select rowid from v where vector match '[0]' and t > 'm'"
-    if sqlite3.sqlite_version_info >= (3, 41, 0):
+    if sqlite3.sqlite_version_info >= (3, 40, 0):
         assert [r[0] for r in db.execute(query + " and k = 1")] == [2]
         assert [r[0] for r in db.execute(query + " limit 1")] == [2]
     else:
@@ -1607,7 +1643,7 @@ def test_knn_text_filters_when_the_authorizer_denies_pragmas(tmp_path):
 
 
 @pytest.mark.skipif(
-    sqlite3.sqlite_version_info < (3, 41, 0),
+    sqlite3.sqlite_version_info < (3, 40, 0),
     reason="older SQLite reads the encoding with PRAGMA encoding",
 )
 def test_vec0_create_fails_when_the_encoding_cannot_be_read():

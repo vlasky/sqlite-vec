@@ -188,7 +188,33 @@ The third character of the block is the constraint operator. It will be one of
 `enum vec0_metadata_operator`, as only a subset of operators are supported on
 metadata column KNN filters.
 
-The foruth character of the block is a `_` filler.
+The fourth character of the block is the collation the constraint compares text
+under, one of `enum vec0_collation`: `_` for BINARY, `n` for NOCASE and `r` for
+RTRIM. Constraints on non-text columns always carry `_`.
+
+Each claimed constraint keeps exactly the rows SQLite would keep, so vec0 sets
+`omit` and SQLite may skip checking it again. A few constraints cannot be
+checked exactly before the k nearest rows are chosen: `!=` and `IS NOT` under a
+collation other than BINARY (SQLite hands those operators to a virtual table
+without their left operand, so the collation is unknown), and `LIKE` and `GLOB`,
+which vec0 matches with `sqlite3_strlike()` and `sqlite3_strglob()` before the
+k are chosen and SQLite's own `like()` and `glob()` decide afterwards, so
+`PRAGMA case_sensitive_like` is honoured. For those vec0 keeps a superset of
+the rows, leaves `omit` unset, and SQLite re-checks each of the k nearest rows
+afterwards. Such a query returns the nearest rows that satisfy the constraint,
+but possibly fewer than k of them; a larger k recovers the rest. Two cases are
+not recovered by a larger k: an application's replacement `like()` or `glob()`
+that accepts rows the built-in matching rejects, since those rows are never
+candidates, and `x IN (SELECT ... COLLATE y)`, which SQLite compares under the
+subquery's collation while `sqlite3_vtab_collation()` reports the left
+operand's, so vec0 compares under the left operand's and drops rows SQLite
+would keep. Name the collation on the left operand instead. vec0 implements
+NOCASE and RTRIM itself, so an application that replaces either built-in
+collation is not honoured. A constraint's value takes the metadata column's
+affinity, as R-Tree's do; SQLite instead applies numeric affinity when a text
+column is compared with an integer or real column of another table, so a join
+condition such as `v.t = nums.n` can keep a row (`'05'` against 5) that vec0
+drops, as it did before this change.
 
 #### `VEC0_IDXSTR_KIND_KNN_DISTANCE_CONSTRAINT` (`'*'`)
 
@@ -210,8 +236,10 @@ the values of `enum vec0_distance_constraint_operator`:
 
 The third and fourth characters of the block are `_` fillers.
 
-**Note on precision:** Distance values are cast from f64 to f32 for comparison, which may
-result in precision loss for very small distance differences.
+**Note on precision:** A row's f32 distance is widened to double and compared with
+the double SQLite received for the threshold, so a threshold a hair above or
+below a row's distance keeps or drops the row exactly as SQLite's own check
+would.
 
 **Note on pagination:** When multiple vectors have identical distances, pagination using
 `distance > X` may skip some results. For stable pagination, combine distance with rowid:
