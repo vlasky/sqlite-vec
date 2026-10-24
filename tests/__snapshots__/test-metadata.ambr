@@ -559,15 +559,25 @@
   })
 # ---
 # name: test_glob_boundary_conditions[boundary: case sensitive at 12 bytes]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name glob 'EXACTLY_*'",
+    'rows': list([
+    ]),
   })
 # ---
 # name: test_glob_boundary_conditions[boundary: prefix pattern at boundary]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name glob 'exactly_*'",
+    'rows': list([
+      OrderedDict({
+        'rowid': 2,
+        'name': 'exactly_13chr',
+      }),
+      OrderedDict({
+        'rowid': 1,
+        'name': 'exactly_12ch',
+      }),
+    ]),
   })
 # ---
 # name: test_glob_case_sensitive[complex pattern case sensitive]
@@ -1398,33 +1408,66 @@
   })
 # ---
 # name: test_like_boundary_conditions[12-byte boundary: exact match]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name like 'exactly_12%'",
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'name': 'exactly_12ch',
+      }),
+    ]),
   })
 # ---
 # name: test_like_boundary_conditions[12-byte boundary: prefix matches both 12 and 13 byte strings]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name like 'exactly%'",
+    'rows': list([
+      OrderedDict({
+        'rowid': 2,
+        'name': 'exactly_13chr',
+      }),
+      OrderedDict({
+        'rowid': 1,
+        'name': 'exactly_12ch',
+      }),
+    ]),
   })
 # ---
 # name: test_like_boundary_conditions[13-byte boundary: 12-byte pattern]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name like 'exactly_13ch%'",
+    'rows': list([
+      OrderedDict({
+        'rowid': 2,
+        'name': 'exactly_13chr',
+      }),
+    ]),
   })
 # ---
 # name: test_like_boundary_conditions[boundary: case insensitive at 12 bytes]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name like 'EXACTLY_12%'",
+    'rows': list([
+      OrderedDict({
+        'rowid': 1,
+        'name': 'exactly_12ch',
+      }),
+    ]),
   })
 # ---
 # name: test_like_boundary_conditions[boundary: short pattern on mixed length strings]
-  dict({
-    'error': 'OperationalError',
-    'message': 'Could not filter metadata fields',
+  OrderedDict({
+    'sql': "select rowid, name from v where vector match '[1]' and k = 5 and name like 'this%'",
+    'rows': list([
+      OrderedDict({
+        'rowid': 5,
+        'name': 'this_is_much_longer_than_12_bytes',
+      }),
+      OrderedDict({
+        'rowid': 4,
+        'name': 'this_is_14byte',
+      }),
+    ]),
   })
 # ---
 # name: test_like_case_insensitive[complex pattern case insensitive]
