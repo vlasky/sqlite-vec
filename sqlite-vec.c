@@ -6222,7 +6222,8 @@ void merge_sorted_lists(f32 *a, i64 *a_rowids, i64 a_length, f32 *b,
       out_rowids[i] = a_rowids[ptrA];
       ptrA++;
     } else {
-      if (a[ptrA] <= b[b_top_idxs[ptrB]]) {
+      // A NaN ranks after every number, as in min_idx()
+      if (a[ptrA] <= b[b_top_idxs[ptrB]] || isnan(b[b_top_idxs[ptrB]])) {
         out[i] = a[ptrA];
         out_rowids[i] = a_rowids[ptrA];
         ptrA++;
@@ -6299,44 +6300,105 @@ int bitmap_any(u8 *bitmap, i32 n) {
 }
 
 /**
- * @brief Finds the minimum k items in distances, and writes the indicies to
- * out.
+ * @brief Whether the candidate at index a ranks after the one at index b in
+ * min_idx()'s order: by distance, a NaN distance after every number, and
+ * between equal distances the smaller index after the larger.
+ */
+static int min_idx_after(const f32 *distances, i32 a, i32 b) {
+  int a_nan = isnan(distances[a]), b_nan = isnan(distances[b]);
+  if (a_nan != b_nan) {
+    return a_nan;
+  }
+  if (!a_nan && distances[a] != distances[b]) {
+    return distances[a] > distances[b];
+  }
+  return a < b;
+}
+
+/**
+ * @brief Finds the k candidates with the smallest distances, and writes their
+ * indices to out, nearest first.
+ *
+ * out holds a heap of the k candidates kept so far, whose root is the one that
+ * ranks last, so n candidates cost n log k comparisons; the heap is then
+ * sorted in place. This is upstream's SQLITE_VEC_EXPERIMENTAL_MIN_IDX variant
+ * (https://github.com/asg017/sqlite-vec/blob/04d28bd21773981e2d266bbf6aa4efbd011eb4f6/sqlite-vec.c#L6516)
+ * with min_idx_after() as its order, so that equal distances keep the larger
+ * index first and a NaN distance ranks after every number.
  *
  * @param distances input f32 array of size n, the items to consider.
  * @param n: size of distances array.
+ * @param candidates: bitmap of size n, the indices that may be chosen.
  * @param out: Output array of size k, will contain at most k element indicies
  * @param k: Size of output array
+ * @param k_used: set to the number of indices written to out
  * @return int
  */
 int min_idx(const f32 *distances, i32 n, u8 *candidates, i32 *out, i32 k,
-            u8 *bTaken, i32 *k_used) {
+            i32 *k_used) {
   assert(k > 0);
   assert(k <= n);
 
-  bitmap_clear(bTaken, n);
+  int heap_size = 0;
 
-  for (int ik = 0; ik < k; ik++) {
-    int min_idx = 0;
-    while (min_idx < n &&
-           (bitmap_get(bTaken, min_idx) || !bitmap_get(candidates, min_idx))) {
-      min_idx++;
-    }
-    if (min_idx >= n) {
-      *k_used = ik;
-      return SQLITE_OK;
-    }
+#define HEAP_SIFT_UP(pos)                                                      \
+  do {                                                                         \
+    int _c = (pos);                                                            \
+    while (_c > 0) {                                                           \
+      int _p = (_c - 1) / 2;                                                   \
+      if (min_idx_after(distances, out[_c], out[_p])) {                        \
+        i32 _tmp = out[_p];                                                    \
+        out[_p] = out[_c];                                                     \
+        out[_c] = _tmp;                                                        \
+        _c = _p;                                                               \
+      } else                                                                   \
+        break;                                                                 \
+    }                                                                          \
+  } while (0)
 
-    for (int i = 0; i < n; i++) {
-      if (distances[i] <= distances[min_idx] && !bitmap_get(bTaken, i) &&
-          (bitmap_get(candidates, i))) {
-        min_idx = i;
-      }
-    }
+#define HEAP_SIFT_DOWN(pos, sz)                                                \
+  do {                                                                         \
+    int _p = (pos);                                                            \
+    for (;;) {                                                                 \
+      int _l = 2 * _p + 1, _r = 2 * _p + 2, _largest = _p;                     \
+      if (_l < (sz) && min_idx_after(distances, out[_l], out[_largest]))       \
+        _largest = _l;                                                         \
+      if (_r < (sz) && min_idx_after(distances, out[_r], out[_largest]))       \
+        _largest = _r;                                                         \
+      if (_largest == _p)                                                      \
+        break;                                                                 \
+      i32 _tmp = out[_p];                                                      \
+      out[_p] = out[_largest];                                                 \
+      out[_largest] = _tmp;                                                    \
+      _p = _largest;                                                           \
+    }                                                                          \
+  } while (0)
 
-    out[ik] = min_idx;
-    bitmap_set(bTaken, min_idx, 1);
+  for (int i = 0; i < n; i++) {
+    if (!bitmap_get(candidates, i))
+      continue;
+    if (heap_size < k) {
+      out[heap_size] = i;
+      heap_size++;
+      HEAP_SIFT_UP(heap_size - 1);
+    } else if (min_idx_after(distances, out[0], i)) {
+      out[0] = i;
+      HEAP_SIFT_DOWN(0, heap_size);
+    }
   }
-  *k_used = k;
+
+  // Heapsort to produce ascending order.
+  for (int i = heap_size - 1; i > 0; i--) {
+    i32 tmp = out[0];
+    out[0] = out[i];
+    out[i] = tmp;
+    HEAP_SIFT_DOWN(0, i);
+  }
+
+#undef HEAP_SIFT_UP
+#undef HEAP_SIFT_DOWN
+
+  *k_used = heap_size;
   return SQLITE_OK;
 }
 
@@ -7320,7 +7382,6 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
   f32 *tmp_topk_distances = NULL; // memory: k * 4
   f32 *chunk_distances = NULL;    // memory: chunk_size * 4
   u8 *b = NULL;                   // memory: chunk_size / 8
-  u8 *bTaken = NULL;              // memory: chunk_size / 8
   i32 *chunk_topk_idxs = NULL;    // memory: k * 4
   u8 *bmRowids = NULL;            // memory: chunk_size / 8
   u8 *bmMetadata = NULL;            // memory: chunk_size / 8
@@ -7372,12 +7433,6 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
 
   b = bitmap_new(p->chunk_size);
   if (!b) {
-    rc = SQLITE_NOMEM;
-    goto cleanup;
-  }
-
-  bTaken = bitmap_new(p->chunk_size);
-  if (!bTaken) {
     rc = SQLITE_NOMEM;
     goto cleanup;
   }
@@ -7661,7 +7716,7 @@ int vec0Filter_knn_chunks_iter(vec0_vtab *p, sqlite3_stmt *stmtChunks,
 
     int used1;
     min_idx(chunk_distances, p->chunk_size, b, chunk_topk_idxs,
-            min(k, p->chunk_size), bTaken, &used1);
+            min(k, p->chunk_size), &used1);
 
     i64 used;
     merge_sorted_lists(topk_distances, topk_rowids, k_used, chunk_distances,
@@ -7694,7 +7749,6 @@ cleanup:
   sqlite3_free(tmp_topk_rowids);
   sqlite3_free(tmp_topk_distances);
   sqlite3_free(b);
-  sqlite3_free(bTaken);
   sqlite3_free(bmRowids);
   sqlite3_free(baseVectors);
   sqlite3_free(chunk_distances);
@@ -11331,7 +11385,6 @@ static int vec_static_blob_entriesFilter(sqlite3_vtab_cursor *pVtabCursor,
     i32 *topk_rowids = NULL;
     f32 *distances = NULL;
     u8 *candidates = NULL;
-    u8 *taken = NULL;
     int rc = SQLITE_OK;
 
     knn_data = sqlite3_malloc(sizeof(*knn_data));
@@ -11400,18 +11453,12 @@ static int vec_static_blob_entriesFilter(sqlite3_vtab_cursor *pVtabCursor,
       goto knn_cleanup;
     }
 
-    taken = bitmap_new(bsize);
-    if (!taken) {
-      rc = SQLITE_NOMEM;
-      goto knn_cleanup;
-    }
-
     bitmap_fill(candidates, bsize);
     for (size_t i = bsize; i >= p->blob->nvectors; i--) {
       bitmap_set(candidates, i, 0);
     }
     i32 k_used = 0;
-    min_idx(distances, bsize, candidates, topk_rowids, k, taken, &k_used);
+    min_idx(distances, bsize, candidates, topk_rowids, k, &k_used);
     knn_data->current_idx = 0;
     knn_data->distances = distances;
     knn_data->k = k;
@@ -11421,7 +11468,6 @@ static int vec_static_blob_entriesFilter(sqlite3_vtab_cursor *pVtabCursor,
 
     // Cleanup temporary allocations (not owned by knn_data)
     sqlite3_free(candidates);
-    sqlite3_free(taken);
     cleanup(queryVector);
     return SQLITE_OK;
 
@@ -11430,7 +11476,6 @@ knn_cleanup:
     sqlite3_free(topk_rowids);
     sqlite3_free(distances);
     sqlite3_free(candidates);
-    sqlite3_free(taken);
     cleanup(queryVector);
     return rc;
   } else {
