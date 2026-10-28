@@ -24,6 +24,18 @@ jobs:
       # after the upload, so dist/test-unit stays out of the artifact
       - run: make test-unit
       - run: cargo test --locked --manifest-path tests/Cargo.toml
+  test-linux-aarch64-extension:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: ./scripts/vendor.sh
+      - run: make loadable static
+      - run: uv sync --directory tests
+      - run: make test-loadable python=./tests/.venv/bin/python
+      - run: make test-unit
   build-macos-x86_64-extension:
     runs-on: macos-15-intel
     steps:

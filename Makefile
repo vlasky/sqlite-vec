@@ -66,6 +66,16 @@ ifndef OMIT_SIMD
 	ifeq ($(shell uname -sm),Darwin arm64)
 	CFLAGS += -mcpu=apple-m1 -DSQLITE_VEC_ENABLE_NEON
 	endif
+	# NEON is in the arm64 baseline (GCC and Clang define __ARM_NEON for
+	# aarch64 with no -m flag), so the Linux build needs only the define. It
+	# follows the compiler's target, not uname: 32-bit Raspberry Pi OS runs a
+	# 64-bit kernel, so uname says aarch64 while gcc targets 32-bit ARM, which
+	# lacks the AArch64-only intrinsics the NEON kernels use.
+	ifeq ($(shell uname -s),Linux)
+	ifneq ($(filter aarch64-%,$(shell $(CC) -dumpmachine)),)
+	CFLAGS += -DSQLITE_VEC_ENABLE_NEON
+	endif
+	endif
 	endif
 endif
 

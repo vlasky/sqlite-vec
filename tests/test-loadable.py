@@ -704,6 +704,11 @@ def test_vec_distance_l2():
         [127, -128, 127, -128, 127, -128, 127, -128],
         dtype=np.int8,
     )
+    # the NEON kernel sums the squares in an integer, which 65025 per element
+    # overflows in 32 bits from 33,026 elements at opposite extremes; 33,032
+    # is a multiple of eight, so it also exercises a tail-free run
+    for n in [33025, 33026, 33032]:
+        check([-128] * n, [127] * n, dtype=np.int8)
 
 
 def test_vec_length():

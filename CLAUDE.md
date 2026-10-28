@@ -36,7 +36,7 @@ Run `./scripts/vendor.sh` first to download vendored dependencies (sqlite3.c, sh
 - Set `AR=` to use a different archiver (default: ar)
 
 **SIMD control:**
-- SIMD is auto-enabled on Darwin x86_64 (AVX) and Darwin arm64 (NEON)
+- SIMD is auto-enabled on Darwin x86_64 (AVX), Darwin arm64 (NEON), and Linux arm64 (NEON)
 - Set `OMIT_SIMD=1` to disable SIMD optimizations
 
 ### Testing
