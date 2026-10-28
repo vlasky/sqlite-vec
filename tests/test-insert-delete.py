@@ -247,6 +247,23 @@ def test_delete_keeps_chunk_while_another_validity_byte_has_rows(db):
         assert chunks() == 0
 
 
+def test_delete_keeps_chunk_refilled_by_a_shadow_table_trigger(db):
+    # A trigger on a shadow table (allowed unless SQLITE_DBCONFIG_DEFENSIVE is
+    # on) can insert into the table while a DELETE runs. The chunk's last row
+    # going does not reclaim the chunk if the trigger put a row back into it.
+    db.execute("create virtual table v using vec0(emb float[1], chunk_size=8)")
+    db.execute("insert into v(rowid, emb) values (1, ?)", [_f32([1.0])])
+    db.execute(
+        "create trigger refill after delete on v_rowids when old.rowid = 1 "
+        "begin insert into v(rowid, emb) values (2, '[2]'); end"
+    )
+    db.execute("delete from v where rowid = 1")
+    assert db.execute("select count(*) from v_chunks").fetchone()[0] == 1
+    assert [r[0] for r in db.execute("select rowid from v")] == [2]
+    rows = db.execute("select rowid from v where emb match ? and k = 5", [_f32([0.0])])
+    assert [r[0] for r in rows] == [2]
+
+
 def test_delete_chunk_multiple_chunks(db):
     db.execute("create virtual table v using vec0(emb float[4], chunk_size=8)")
 

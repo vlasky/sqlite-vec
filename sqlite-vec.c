@@ -9640,6 +9640,45 @@ cleanup:
   return SQLITE_OK;
 }
 
+// Sets *empty to whether every validity bit of the chunk is zero, read through
+// a fresh handle. A DELETE learns that its row's byte went to zero while
+// clearing the bit, but a trigger on a shadow table can insert into the chunk
+// before the chunk is reclaimed, so the bitmap is read again first.
+static int vec0Update_Delete_ChunkIsEmpty(vec0_vtab *p, i64 chunk_id,
+                                          int *empty) {
+  sqlite3_blob *blobValidity = NULL;
+  *empty = 0;
+  int rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowChunksName,
+                             "validity", chunk_id, 0, &blobValidity);
+  if (rc != SQLITE_OK) {
+    vtab_set_error(&p->base, "could not open validity blob for chunk %lld",
+                   chunk_id);
+    return SQLITE_ERROR;
+  }
+  int validitySize = sqlite3_blob_bytes(blobValidity);
+  unsigned char *validity = sqlite3_malloc(validitySize);
+  if (!validity) {
+    sqlite3_blob_close(blobValidity);
+    return SQLITE_NOMEM;
+  }
+  rc = sqlite3_blob_read(blobValidity, validity, validitySize, 0);
+  int brc = sqlite3_blob_close(blobValidity);
+  if (rc == SQLITE_OK) {
+    rc = brc;
+  }
+  if (rc == SQLITE_OK) {
+    *empty = 1;
+    for (int i = 0; i < validitySize; i++) {
+      if (validity[i] != 0) {
+        *empty = 0;
+        break;
+      }
+    }
+  }
+  sqlite3_free(validity);
+  return rc;
+}
+
 // Delete a chunk whose last row a DELETE cleared, with its associated
 // vector/metadata shadow table rows.
 int vec0Update_Delete_DeleteChunk(vec0_vtab *p, i64 chunk_id) {
@@ -10006,9 +10045,17 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
     }
   }
 
-  // 8. reclaim chunk if fully empty
+  // 8. reclaim chunk if fully empty. Steps 5 to 7 run statements that can
+  // fire triggers on the shadow tables, which may have refilled the chunk,
+  // so a chunk that looked empty is checked again before it goes.
   if (chunkEmpty) {
-    return vec0Update_Delete_DeleteChunk(p, chunk_id);
+    rc = vec0Update_Delete_ChunkIsEmpty(p, chunk_id, &chunkEmpty);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    if (chunkEmpty) {
+      return vec0Update_Delete_DeleteChunk(p, chunk_id);
+    }
   }
   return SQLITE_OK;
 }
