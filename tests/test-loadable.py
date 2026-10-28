@@ -417,13 +417,30 @@ def test_vec_distance_cosine():
         b = np.array(b, dtype=dtype)
 
         x = vec_distance_cosine(a, b, a=transform, b=transform)
-        y = npy_cosine(a, b)
+        # the reference in float64: numpy sums int8 products in int8
+        y = npy_cosine(a.astype(np.float64), b.astype(np.float64))
         assert isclose(x, y, abs_tol=1e-6)
 
     check([1.2, 0.1], [0.4, -0.4])
     check([-1.2, -0.1], [-0.4, 0.4])
     check([1, 2, 3], [-9, -8, -7], dtype=np.int8)
     assert vec_distance_cosine("[1.1, 1.0]", "[1.2, 1.2]") == 0.0011318627512082458
+
+    # lengths past the SIMD kernels' thresholds, with and without a remainder
+    # past their 16-element blocks
+    rng = np.random.default_rng(324)
+    for n in [17, 31, 32, 40, 127, 768]:
+        check(rng.uniform(-1, 1, n), rng.uniform(-1, 1, n))
+        check(rng.integers(-128, 128, n), rng.integers(-128, 128, n), dtype=np.int8)
+    # check overflow of 32-bit sums. Squares of 128 (2^14) and 64 (2^12) keep
+    # every partial sum exact in f32, so the scalar build matches too.
+    # 131,072 squares of 128 sum to 2^31, past INT32_MAX:
+    check([-128] * 131072, [-128] * 131072, dtype=np.int8)
+    # 2^32 in total, which wraps a 32-bit sum to 0:
+    check([64] * 1048576, [-64] * 1048576, dtype=np.int8)
+    # 32-bit partial sums of every 8th square reach 2^31, so widening only the
+    # final sum to 64 bits is not enough:
+    check([-128] * 1048576, [-128] * 1048576, dtype=np.int8)
 
     vec_distance_cosine_bit = lambda *args: db.execute(
         "select vec_distance_cosine(vec_bit(?), vec_bit(?))", args
@@ -477,18 +494,22 @@ def test_vec_distance_cosine_extreme_magnitudes():
         "select vec_distance_cosine(?, ?)", [_f32(a), _f32(b)]
     ).fetchone()[0]
 
-    for scale in [1e-45, 1e-30, 1e-25, 1e-20, 1.0, 1e20, 3e38]:
-        # cosine distance is invariant under positive scaling
-        assert vec_distance_cosine([1, 0], [scale, 0]) == 0.0
-        assert vec_distance_cosine([scale, 0], [1, 0]) == 0.0
-        assert vec_distance_cosine([scale, 0], [scale, 0]) == 0.0
-        assert vec_distance_cosine([1, 0], [-scale, 0]) == 2.0
-        assert vec_distance_cosine([1, 0], [0, scale]) == 1.0
-        assert isclose(
-            vec_distance_cosine([1, 0], [scale, scale]),
-            1 - 1 / np.sqrt(2),
-            abs_tol=1e-6,
-        )
+    # the same 2-element vectors padded to 40 elements, past the SIMD kernels'
+    # threshold, with a remainder past their 16-element blocks
+    for pad in [0, 38]:
+        z = [0] * pad
+        for scale in [1e-45, 1e-30, 1e-25, 1e-20, 1.0, 1e20, 3e38]:
+            # cosine distance is invariant under positive scaling
+            assert vec_distance_cosine([1, 0] + z, [scale, 0] + z) == 0.0
+            assert vec_distance_cosine([scale, 0] + z, [1, 0] + z) == 0.0
+            assert vec_distance_cosine([scale, 0] + z, [scale, 0] + z) == 0.0
+            assert vec_distance_cosine([1, 0] + z, [-scale, 0] + z) == 2.0
+            assert vec_distance_cosine([1, 0] + z, [0, scale] + z) == 1.0
+            assert isclose(
+                vec_distance_cosine([1, 0] + z, [scale, scale] + z),
+                1 - 1 / np.sqrt(2),
+                abs_tol=1e-6,
+            )
 
 
 def test_ensure_vector_match_cleanup_on_second_vector_error():

@@ -407,6 +407,236 @@ static double l1_f32_neon(const void *pVect1v, const void *pVect2v,
 
   return vaddvq_f64(acc) + sum;
 }
+
+// asg017/sqlite-vec's cosine_float_neon, with its sums kept in double as
+// distance_cosine_float keeps them: each float32x4 load is widened to two
+// float64x2 halves before it is multiplied and added.
+static f32 cosine_float_neon(const void *pVect1v, const void *pVect2v,
+                             const void *qty_ptr) {
+  f32 *pVect1 = (f32 *)pVect1v;
+  f32 *pVect2 = (f32 *)pVect2v;
+  size_t qty = *((size_t *)qty_ptr);
+  size_t qty16 = qty >> 4;
+  const f32 *pEnd1 = pVect1 + (qty16 << 4);
+
+  float64x2_t dot0 = vdupq_n_f64(0), dot1 = vdupq_n_f64(0);
+  float64x2_t dot2 = vdupq_n_f64(0), dot3 = vdupq_n_f64(0);
+  float64x2_t amag0 = vdupq_n_f64(0), amag1 = vdupq_n_f64(0);
+  float64x2_t amag2 = vdupq_n_f64(0), amag3 = vdupq_n_f64(0);
+  float64x2_t bmag0 = vdupq_n_f64(0), bmag1 = vdupq_n_f64(0);
+  float64x2_t bmag2 = vdupq_n_f64(0), bmag3 = vdupq_n_f64(0);
+
+  while (pVect1 < pEnd1) {
+    float32x4_t v1, v2;
+    float64x2_t a, b;
+
+    v1 = vld1q_f32(pVect1);
+    pVect1 += 4;
+    v2 = vld1q_f32(pVect2);
+    pVect2 += 4;
+    a = vcvt_f64_f32(vget_low_f32(v1));
+    b = vcvt_f64_f32(vget_low_f32(v2));
+    dot0 = vfmaq_f64(dot0, a, b);
+    amag0 = vfmaq_f64(amag0, a, a);
+    bmag0 = vfmaq_f64(bmag0, b, b);
+    a = vcvt_high_f64_f32(v1);
+    b = vcvt_high_f64_f32(v2);
+    dot0 = vfmaq_f64(dot0, a, b);
+    amag0 = vfmaq_f64(amag0, a, a);
+    bmag0 = vfmaq_f64(bmag0, b, b);
+
+    v1 = vld1q_f32(pVect1);
+    pVect1 += 4;
+    v2 = vld1q_f32(pVect2);
+    pVect2 += 4;
+    a = vcvt_f64_f32(vget_low_f32(v1));
+    b = vcvt_f64_f32(vget_low_f32(v2));
+    dot1 = vfmaq_f64(dot1, a, b);
+    amag1 = vfmaq_f64(amag1, a, a);
+    bmag1 = vfmaq_f64(bmag1, b, b);
+    a = vcvt_high_f64_f32(v1);
+    b = vcvt_high_f64_f32(v2);
+    dot1 = vfmaq_f64(dot1, a, b);
+    amag1 = vfmaq_f64(amag1, a, a);
+    bmag1 = vfmaq_f64(bmag1, b, b);
+
+    v1 = vld1q_f32(pVect1);
+    pVect1 += 4;
+    v2 = vld1q_f32(pVect2);
+    pVect2 += 4;
+    a = vcvt_f64_f32(vget_low_f32(v1));
+    b = vcvt_f64_f32(vget_low_f32(v2));
+    dot2 = vfmaq_f64(dot2, a, b);
+    amag2 = vfmaq_f64(amag2, a, a);
+    bmag2 = vfmaq_f64(bmag2, b, b);
+    a = vcvt_high_f64_f32(v1);
+    b = vcvt_high_f64_f32(v2);
+    dot2 = vfmaq_f64(dot2, a, b);
+    amag2 = vfmaq_f64(amag2, a, a);
+    bmag2 = vfmaq_f64(bmag2, b, b);
+
+    v1 = vld1q_f32(pVect1);
+    pVect1 += 4;
+    v2 = vld1q_f32(pVect2);
+    pVect2 += 4;
+    a = vcvt_f64_f32(vget_low_f32(v1));
+    b = vcvt_f64_f32(vget_low_f32(v2));
+    dot3 = vfmaq_f64(dot3, a, b);
+    amag3 = vfmaq_f64(amag3, a, a);
+    bmag3 = vfmaq_f64(bmag3, b, b);
+    a = vcvt_high_f64_f32(v1);
+    b = vcvt_high_f64_f32(v2);
+    dot3 = vfmaq_f64(dot3, a, b);
+    amag3 = vfmaq_f64(amag3, a, a);
+    bmag3 = vfmaq_f64(bmag3, b, b);
+  }
+
+  double dot =
+      vaddvq_f64(vaddq_f64(vaddq_f64(dot0, dot1), vaddq_f64(dot2, dot3)));
+  double aMag =
+      vaddvq_f64(vaddq_f64(vaddq_f64(amag0, amag1), vaddq_f64(amag2, amag3)));
+  double bMag =
+      vaddvq_f64(vaddq_f64(vaddq_f64(bmag0, bmag1), vaddq_f64(bmag2, bmag3)));
+
+  const f32 *pEnd2 = pVect1 + (qty - (qty16 << 4));
+  while (pVect1 < pEnd2) {
+    dot += (double)*pVect1 * (double)*pVect2;
+    aMag += (double)*pVect1 * (double)*pVect1;
+    bMag += (double)*pVect2 * (double)*pVect2;
+    pVect1++;
+    pVect2++;
+  }
+
+  return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+}
+
+// asg017/sqlite-vec's cosine_int8_neon, finishing as distance_cosine_int8
+// does. Products of int8 elements are summed exactly: a 32-bit lane holds one
+// pass's products, but 131,072 squares of -128 overflow a 32-bit sum, so each
+// pass's lanes are added into 64-bit lanes.
+static f32 cosine_int8_neon(const void *pA, const void *pB, const void *pD) {
+  const i8 *a = (const i8 *)pA;
+  const i8 *b = (const i8 *)pB;
+  size_t d = *((const size_t *)pD);
+  const i8 *aEnd = a + d;
+
+  int64x2_t dot_acc = vdupq_n_s64(0);
+  int64x2_t aMag_acc = vdupq_n_s64(0);
+  int64x2_t bMag_acc = vdupq_n_s64(0);
+
+  while (a < aEnd - 31) {
+    int32x4_t dot_acc1 = vdupq_n_s32(0);
+    int32x4_t dot_acc2 = vdupq_n_s32(0);
+    int32x4_t aMag_acc1 = vdupq_n_s32(0);
+    int32x4_t aMag_acc2 = vdupq_n_s32(0);
+    int32x4_t bMag_acc1 = vdupq_n_s32(0);
+    int32x4_t bMag_acc2 = vdupq_n_s32(0);
+    int8x16_t va1 = vld1q_s8(a);
+    int8x16_t vb1 = vld1q_s8(b);
+    int16x8_t a1_lo = vmovl_s8(vget_low_s8(va1));
+    int16x8_t a1_hi = vmovl_s8(vget_high_s8(va1));
+    int16x8_t b1_lo = vmovl_s8(vget_low_s8(vb1));
+    int16x8_t b1_hi = vmovl_s8(vget_high_s8(vb1));
+
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a1_lo), vget_low_s16(b1_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a1_lo), vget_high_s16(b1_lo));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_low_s16(a1_hi), vget_low_s16(b1_hi));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_high_s16(a1_hi), vget_high_s16(b1_hi));
+
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a1_lo), vget_low_s16(a1_lo));
+    aMag_acc1 =
+        vmlal_s16(aMag_acc1, vget_high_s16(a1_lo), vget_high_s16(a1_lo));
+    aMag_acc2 = vmlal_s16(aMag_acc2, vget_low_s16(a1_hi), vget_low_s16(a1_hi));
+    aMag_acc2 =
+        vmlal_s16(aMag_acc2, vget_high_s16(a1_hi), vget_high_s16(a1_hi));
+
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b1_lo), vget_low_s16(b1_lo));
+    bMag_acc1 =
+        vmlal_s16(bMag_acc1, vget_high_s16(b1_lo), vget_high_s16(b1_lo));
+    bMag_acc2 = vmlal_s16(bMag_acc2, vget_low_s16(b1_hi), vget_low_s16(b1_hi));
+    bMag_acc2 =
+        vmlal_s16(bMag_acc2, vget_high_s16(b1_hi), vget_high_s16(b1_hi));
+
+    int8x16_t va2 = vld1q_s8(a + 16);
+    int8x16_t vb2 = vld1q_s8(b + 16);
+    int16x8_t a2_lo = vmovl_s8(vget_low_s8(va2));
+    int16x8_t a2_hi = vmovl_s8(vget_high_s8(va2));
+    int16x8_t b2_lo = vmovl_s8(vget_low_s8(vb2));
+    int16x8_t b2_hi = vmovl_s8(vget_high_s8(vb2));
+
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a2_lo), vget_low_s16(b2_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a2_lo), vget_high_s16(b2_lo));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_low_s16(a2_hi), vget_low_s16(b2_hi));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_high_s16(a2_hi), vget_high_s16(b2_hi));
+
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a2_lo), vget_low_s16(a2_lo));
+    aMag_acc1 =
+        vmlal_s16(aMag_acc1, vget_high_s16(a2_lo), vget_high_s16(a2_lo));
+    aMag_acc2 = vmlal_s16(aMag_acc2, vget_low_s16(a2_hi), vget_low_s16(a2_hi));
+    aMag_acc2 =
+        vmlal_s16(aMag_acc2, vget_high_s16(a2_hi), vget_high_s16(a2_hi));
+
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b2_lo), vget_low_s16(b2_lo));
+    bMag_acc1 =
+        vmlal_s16(bMag_acc1, vget_high_s16(b2_lo), vget_high_s16(b2_lo));
+    bMag_acc2 = vmlal_s16(bMag_acc2, vget_low_s16(b2_hi), vget_low_s16(b2_hi));
+    bMag_acc2 =
+        vmlal_s16(bMag_acc2, vget_high_s16(b2_hi), vget_high_s16(b2_hi));
+
+    dot_acc = vpadalq_s32(dot_acc, vaddq_s32(dot_acc1, dot_acc2));
+    aMag_acc = vpadalq_s32(aMag_acc, vaddq_s32(aMag_acc1, aMag_acc2));
+    bMag_acc = vpadalq_s32(bMag_acc, vaddq_s32(bMag_acc1, bMag_acc2));
+    a += 32;
+    b += 32;
+  }
+
+  while (a < aEnd - 15) {
+    int32x4_t dot_acc1 = vdupq_n_s32(0);
+    int32x4_t aMag_acc1 = vdupq_n_s32(0);
+    int32x4_t bMag_acc1 = vdupq_n_s32(0);
+    int8x16_t va = vld1q_s8(a);
+    int8x16_t vb = vld1q_s8(b);
+    int16x8_t a_lo = vmovl_s8(vget_low_s8(va));
+    int16x8_t a_hi = vmovl_s8(vget_high_s8(va));
+    int16x8_t b_lo = vmovl_s8(vget_low_s8(vb));
+    int16x8_t b_hi = vmovl_s8(vget_high_s8(vb));
+
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a_lo), vget_low_s16(b_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a_lo), vget_high_s16(b_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a_hi), vget_low_s16(b_hi));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a_hi), vget_high_s16(b_hi));
+
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a_lo), vget_low_s16(a_lo));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_high_s16(a_lo), vget_high_s16(a_lo));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a_hi), vget_low_s16(a_hi));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_high_s16(a_hi), vget_high_s16(a_hi));
+
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b_lo), vget_low_s16(b_lo));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_high_s16(b_lo), vget_high_s16(b_lo));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b_hi), vget_low_s16(b_hi));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_high_s16(b_hi), vget_high_s16(b_hi));
+
+    dot_acc = vpadalq_s32(dot_acc, dot_acc1);
+    aMag_acc = vpadalq_s32(aMag_acc, aMag_acc1);
+    bMag_acc = vpadalq_s32(bMag_acc, bMag_acc1);
+    a += 16;
+    b += 16;
+  }
+
+  i64 dot = vaddvq_s64(dot_acc);
+  i64 aMag = vaddvq_s64(aMag_acc);
+  i64 bMag = vaddvq_s64(bMag_acc);
+
+  while (a < aEnd) {
+    dot += (i32)*a * (i32)*b;
+    aMag += (i32)*a * (i32)*a;
+    bMag += (i32)*b * (i32)*b;
+    a++;
+    b++;
+  }
+
+  return 1 - ((f32)dot / (sqrt((f32)aMag) * sqrt((f32)bMag)));
+}
 #endif
 
 static f32 l2_sqr_float(const void *pVect1v, const void *pVect2v,
@@ -589,6 +819,11 @@ static f32 distance_cosine_bit(const void *pA, const void *pB,
 
 static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
                                  const void *qty_ptr) {
+#ifdef SQLITE_VEC_ENABLE_NEON
+  if ((*(const size_t *)qty_ptr) > 16) {
+    return cosine_float_neon(pVect1v, pVect2v, qty_ptr);
+  }
+#endif
   f32 *pVect1 = (f32 *)pVect1v;
   f32 *pVect2 = (f32 *)pVect2v;
   size_t qty = *((size_t *)qty_ptr);
@@ -611,6 +846,11 @@ static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
 }
 static f32 distance_cosine_int8(const void *pA, const void *pB,
                                 const void *pD) {
+#ifdef SQLITE_VEC_ENABLE_NEON
+  if ((*(const size_t *)pD) > 15) {
+    return cosine_int8_neon(pA, pB, pD);
+  }
+#endif
   i8 *a = (i8 *)pA;
   i8 *b = (i8 *)pB;
   size_t d = *((size_t *)pD);
