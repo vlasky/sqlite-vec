@@ -11383,6 +11383,15 @@ struct vec_static_blob_data {
   static_blob static_blobs[MAX_STATIC_BLOBS];
 };
 
+/** Frees the registry and the names vec_static_blobsUpdate() copied in. */
+static void vec_static_blob_data_free(void *p) {
+  vec_static_blob_data *data = p;
+  for (int i = 0; i < MAX_STATIC_BLOBS; i++) {
+    sqlite3_free(data->static_blobs[i].name);
+  }
+  sqlite3_free(data);
+}
+
 typedef struct vec_static_blobs_vtab vec_static_blobs_vtab;
 struct vec_static_blobs_vtab {
   sqlite3_vtab base;
@@ -11689,7 +11698,10 @@ static int vec_static_blob_entriesOpen(sqlite3_vtab *p,
 
 static int vec_static_blob_entriesClose(sqlite3_vtab_cursor *cur) {
   vec_static_blob_entries_cursor *pCur = (vec_static_blob_entries_cursor *)cur;
-  sqlite3_free(pCur->knn_data);
+  if (pCur->knn_data) {
+    sbe_query_knn_data_clear(pCur->knn_data);
+    sqlite3_free(pCur->knn_data);
+  }
   sqlite3_free(pCur);
   return SQLITE_OK;
 }
@@ -11863,7 +11875,7 @@ static int vec_static_blob_entriesFilter(sqlite3_vtab_cursor *pVtabCursor,
     }
 
     bitmap_fill(candidates, bsize);
-    for (size_t i = bsize; i >= p->blob->nvectors; i--) {
+    for (size_t i = p->blob->nvectors; i < bsize; i++) {
       bitmap_set(candidates, i, 0);
     }
     i32 k_used = 0;
@@ -12166,7 +12178,7 @@ sqlite3_vec_static_blobs_init(sqlite3 *db, char **pzErrMsg,
     return rc;
 
   rc = sqlite3_create_module_v2(db, "vec_static_blobs", &vec_static_blobsModule,
-                                static_blob_data, sqlite3_free);
+                                static_blob_data, vec_static_blob_data_free);
   if (rc != SQLITE_OK)
     return rc;
   rc = sqlite3_create_module_v2(db, "vec_static_blob_entries",
