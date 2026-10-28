@@ -6007,6 +6007,38 @@ typedef enum {
   VEC0_DISTANCE_CONSTRAINT_LE = 'd',
 } vec0_distance_constraint_operator;
 
+/**
+ * Whether constraint i is an argument of a KNN query: a MATCH on a vector
+ * column, or `k` or a hidden parameter column declared after it (`mmr_lambda`
+ * among them). Filters on rowid, partition key, metadata and distance columns
+ * are not; ARCHITECTURE.md's idxStr section says why they are left to the plan.
+ */
+static int vec0_constraint_is_knn_argument(vec0_vtab *p,
+                                           sqlite3_index_info *pIdxInfo,
+                                           int i) {
+  int iColumn = pIdxInfo->aConstraint[i].iColumn;
+  int op = pIdxInfo->aConstraint[i].op;
+  if (op == SQLITE_INDEX_CONSTRAINT_MATCH) {
+    return vec0_column_idx_is_vector(p, iColumn);
+  }
+  return op == SQLITE_INDEX_CONSTRAINT_EQ && iColumn >= vec0_column_k_idx(p);
+}
+
+/**
+ * Whether a usable constraint other than i supplies the same KNN argument, as
+ * `k = 2` does beside `k = w.n`: the same column under the same operator.
+ */
+static int vec0_knn_argument_is_supplied(sqlite3_index_info *pIdxInfo, int i) {
+  for (int m = 0; m < pIdxInfo->nConstraint; m++) {
+    if (m != i && pIdxInfo->aConstraint[m].usable &&
+        pIdxInfo->aConstraint[m].iColumn == pIdxInfo->aConstraint[i].iColumn &&
+        pIdxInfo->aConstraint[m].op == pIdxInfo->aConstraint[i].op) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
   vec0_vtab *p = (vec0_vtab *)pVTab;
   /**
@@ -6033,6 +6065,30 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
 #ifdef SQLITE_VEC_DEBUG
   printf("pIdxInfo->nOrderBy=%d, pIdxInfo->nConstraint=%d\n", pIdxInfo->nOrderBy, pIdxInfo->nConstraint);
 #endif
+
+  // When a KNN argument reads another table of the query, SQLite also weighs
+  // plans that scan vec0 before that table, in which the argument is unusable.
+  // Such a plan is refused, the way json_each refuses a plan that cannot supply
+  // its argument, so the planner takes one that gives vec0 every argument,
+  // unless a usable constraint supplies the same argument, as `k = 2` does
+  // beside `k = w.n`. SQLite accepts SQLITE_CONSTRAINT from xBestIndex from
+  // 3.26.0 on; before that any error fails the statement, so older libraries
+  // keep the plans they had.
+  if (sqlite3_libversion_number() >= 3026000) {
+    for (int i = 0; i < pIdxInfo->nConstraint; i++) {
+      if (pIdxInfo->aConstraint[i].op == SQLITE_INDEX_CONSTRAINT_MATCH &&
+          vec0_column_idx_is_vector(p, pIdxInfo->aConstraint[i].iColumn)) {
+        for (int j = 0; j < pIdxInfo->nConstraint; j++) {
+          if (!pIdxInfo->aConstraint[j].usable &&
+              vec0_constraint_is_knn_argument(p, pIdxInfo, j) &&
+              !vec0_knn_argument_is_supplied(pIdxInfo, j)) {
+            return SQLITE_CONSTRAINT;
+          }
+        }
+        break;
+      }
+    }
+  }
 
   for (int i = 0; i < pIdxInfo->nConstraint; i++) {
     u8 vtabIn = 0;
