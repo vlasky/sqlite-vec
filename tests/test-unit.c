@@ -488,11 +488,16 @@ void test_vec0_fullscan_schema_rollback() {
   }
 }
 
+// the public header declares only sqlite3_vec_init()
+int sqlite3_vec_static_blobs_init(sqlite3 *db, char **pzErrMsg,
+                                  const sqlite3_api_routines *pApi);
+
 // Returns sqlite3_memory_used() after a connection that ran one KNN query over
-// a 64-vector static blob has been closed. The query's k list filters the same
-// cursor once per value without closing it in between, so results the filter
-// does not free before it allocates new ones show up as memory left behind.
-static sqlite3_int64 static_blob_memory_after(const char *kList, int wantRows) {
+// a 64-vector static blob has been closed. The blob is the inner loop of a
+// join with nOuter driving rows, so SQLite filters the same cursor nOuter
+// times without closing it in between, and results the filter does not free
+// before it allocates new ones show up as memory left behind.
+static sqlite3_int64 static_blob_memory_after(int nOuter) {
   static float vectors[64][4];
   for (int i = 0; i < 64; i++) {
     for (int j = 0; j < 4; j++) {
@@ -516,22 +521,35 @@ static sqlite3_int64 static_blob_memory_after(const char *kList, int wantRows) {
   rc = sqlite3_step(stmt);
   assert(rc == SQLITE_DONE);
   sqlite3_finalize(stmt);
+  char *zErr = NULL;
   rc = sqlite3_exec(db, "create virtual table w using vec_static_blob_entries(w)",
-                    0, 0, 0);
+                    0, 0, &zErr);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "create virtual table failed: %s\n", zErr);
+  }
   assert(rc == SQLITE_OK);
-  char sql[160];
-  snprintf(sql, sizeof sql,
-           "select rowid from w where vector match vec_f32('[0.5, 1.5, 2.5, "
-           "3.5]') and k in (%s)",
-           kList);
-  rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+  rc = sqlite3_exec(db, "create table q(v blob)", 0, 0, 0);
+  assert(rc == SQLITE_OK);
+  for (int i = 0; i < nOuter; i++) {
+    rc = sqlite3_exec(db,
+                      "insert into q(v) values (vec_f32('[0.5, 1.5, 2.5, 3.5]'))",
+                      0, 0, 0);
+    assert(rc == SQLITE_OK);
+  }
+  rc = sqlite3_prepare_v2(db,
+                          "select w.rowid from q cross join w "
+                          "where w.vector match q.v and k = 2 order by distance",
+                          -1, &stmt, 0);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "prepare failed: %s\n", sqlite3_errmsg(db));
+  }
   assert(rc == SQLITE_OK);
   int rows = 0;
   while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
     rows++;
   }
   assert(rc == SQLITE_DONE);
-  assert(rows == wantRows);
+  assert(rows == 2 * nOuter);
   sqlite3_finalize(stmt);
   rc = sqlite3_close(db);
   assert(rc == SQLITE_OK);
@@ -540,8 +558,8 @@ static sqlite3_int64 static_blob_memory_after(const char *kList, int wantRows) {
 
 void test_vec_static_blob_entries_refilter() {
   printf("Starting %s...\n", __func__);
-  sqlite3_int64 once = static_blob_memory_after("2", 2);
-  sqlite3_int64 thrice = static_blob_memory_after("1, 3, 2", 6);
+  sqlite3_int64 once = static_blob_memory_after(1);
+  sqlite3_int64 thrice = static_blob_memory_after(3);
   assert(thrice == once);
 }
 
