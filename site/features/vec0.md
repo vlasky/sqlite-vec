@@ -102,10 +102,30 @@ following operators:
 - `<` Less than
 - `<=` Less than or equal to
 
-Using any other operator like `IS NULL`, `LIKE`, `GLOB`, `REGEXP`, or any scalar
-function will result in an error or incorrect results.
+- `IS`, `IS NOT`, `IS NULL`, `IS NOT NULL`
+- `IN (...)` on integer and text columns
+- `LIKE` and `GLOB` on text columns
 
-Boolean columns only support `=` and `!=` operators.
+Using any other operator like `REGEXP`, or any scalar function, will result in
+an error or incorrect results.
+
+Boolean columns support `=`, `!=`, `IS`, `IS NOT`, `IS NULL` and `IS NOT NULL`.
+
+Text columns compare under the constraint's collation, which may be `BINARY`,
+`NOCASE` or `RTRIM`; any other collation is an error. A few constraints cannot
+be decided before the k nearest rows are chosen, so SQLite checks them again
+afterwards: `!=` and `IS NOT` under `NOCASE` or `RTRIM`, and `LIKE` and `GLOB`
+(matched with SQLite's built-in rules first, then checked by the connection's
+own `like()` and `glob()`, so `PRAGMA case_sensitive_like` is honoured). Such a
+query returns the nearest rows that satisfy the constraint, but possibly fewer
+than `k` of them; raise `k` to get more. Two cases are not recovered by a larger
+`k`: a replacement `like()` or `glob()` that accepts more than the built-in
+matching, and an `IN (SELECT ... COLLATE x)` list, which vec0 compares under the
+column's collation rather than the subquery's; put the `COLLATE` on the column
+instead. vec0 implements `NOCASE` and `RTRIM` itself, so replacing either
+built-in collation is not honoured, and a constraint's value takes the
+column's affinity, so a join condition comparing a text column with an integer
+column of another table can differ from SQLite's own comparison.
 
 ### Partition Key Columns {#partition-keys}
 
