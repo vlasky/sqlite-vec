@@ -1,5 +1,6 @@
 #include "../sqlite-vec.h"
 #include "sqlite-vec-internal.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
@@ -487,6 +488,63 @@ void test_vec0_fullscan_schema_rollback() {
   }
 }
 
+// Returns sqlite3_memory_used() after a connection that ran one KNN query over
+// a 64-vector static blob has been closed. The query's k list filters the same
+// cursor once per value without closing it in between, so results the filter
+// does not free before it allocates new ones show up as memory left behind.
+static sqlite3_int64 static_blob_memory_after(const char *kList, int wantRows) {
+  static float vectors[64][4];
+  for (int i = 0; i < 64; i++) {
+    for (int j = 0; j < 4; j++) {
+      vectors[i][j] = (float)i / 64 + (float)j;
+    }
+  }
+  sqlite3 *db;
+  sqlite3_stmt *stmt;
+  int rc = sqlite3_open(":memory:", &db);
+  assert(rc == SQLITE_OK);
+  rc = sqlite3_vec_init(db, NULL, NULL);
+  assert(rc == SQLITE_OK);
+  rc = sqlite3_vec_static_blobs_init(db, NULL, NULL);
+  assert(rc == SQLITE_OK);
+  rc = sqlite3_prepare_v2(db,
+                          "insert into temp.vec_static_blobs(name, data) "
+                          "select 'w', vec_static_blob_from_raw(?, '<f4', 4, 64)",
+                          -1, &stmt, 0);
+  assert(rc == SQLITE_OK);
+  sqlite3_bind_int64(stmt, 1, (sqlite3_int64)(intptr_t)vectors);
+  rc = sqlite3_step(stmt);
+  assert(rc == SQLITE_DONE);
+  sqlite3_finalize(stmt);
+  rc = sqlite3_exec(db, "create virtual table w using vec_static_blob_entries(w)",
+                    0, 0, 0);
+  assert(rc == SQLITE_OK);
+  char sql[160];
+  snprintf(sql, sizeof sql,
+           "select rowid from w where vector match vec_f32('[0.5, 1.5, 2.5, "
+           "3.5]') and k in (%s)",
+           kList);
+  rc = sqlite3_prepare_v2(db, sql, -1, &stmt, 0);
+  assert(rc == SQLITE_OK);
+  int rows = 0;
+  while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+    rows++;
+  }
+  assert(rc == SQLITE_DONE);
+  assert(rows == wantRows);
+  sqlite3_finalize(stmt);
+  rc = sqlite3_close(db);
+  assert(rc == SQLITE_OK);
+  return sqlite3_memory_used();
+}
+
+void test_vec_static_blob_entries_refilter() {
+  printf("Starting %s...\n", __func__);
+  sqlite3_int64 once = static_blob_memory_after("2", 2);
+  sqlite3_int64 thrice = static_blob_memory_after("1, 3, 2", 6);
+  assert(thrice == once);
+}
+
 int main() {
   printf("Starting unit tests...\n");
   test_vec0_token_next();
@@ -494,5 +552,6 @@ int main() {
   test_vec0_parse_vector_column();
   test_vec0_parse_partition_key_definition();
   test_vec0_fullscan_schema_rollback();
+  test_vec_static_blob_entries_refilter();
   printf("All unit tests passed.\n");
 }

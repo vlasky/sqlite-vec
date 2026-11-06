@@ -12165,6 +12165,14 @@ static int vec_static_blob_entriesFilter(sqlite3_vtab_cursor *pVtabCursor,
   vec_static_blob_entries_vtab *p =
       (vec_static_blob_entries_vtab *)pCur->base.pVtab;
 
+  // A cursor can be filtered again without being closed, as the inner loop
+  // of a join or once per value of k IN (...): free the previous results.
+  if (pCur->knn_data) {
+    sbe_query_knn_data_clear(pCur->knn_data);
+    sqlite3_free(pCur->knn_data);
+    pCur->knn_data = NULL;
+  }
+
   if (idxNum == VEC_SBE__QUERYPLAN_KNN) {
     assert(argc == 2);
     pCur->query_plan = VEC_SBE__QUERYPLAN_KNN;
