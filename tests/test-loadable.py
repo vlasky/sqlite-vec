@@ -264,6 +264,19 @@ def test_vec_static_blob_entries():
     ]
 
 
+def test_vec_static_blob_entries_knn_with_whole_candidate_bytes():
+    # 64 vectors fill the KNN's candidate bitmap to its last byte. The blob
+    # reads the array's memory, so the array stays referenced while it is queried.
+    db = connect(EXT_PATH, extra_entrypoint="sqlite3_vec_static_blobs_init")
+    vectors = np.array([[i / 64] * 4 for i in range(64)], np.float32)
+    register_numpy(db, "w", vectors)
+    rows = db.execute(
+        "select rowid from w where vector match ? and k = 3 order by distance",
+        [np.array([0.5] * 4, dtype=np.float32)],
+    ).fetchall()
+    assert [r[0] for r in rows] == [32, 33, 31]
+
+
 def test_limits():
     db = connect(EXT_PATH)
     with _raises(
