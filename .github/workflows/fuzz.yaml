@@ -60,7 +60,7 @@ jobs:
             timeout-*
 
   fuzz-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     # Best-effort: Homebrew LLVM 18 runtime dylibs pull in
     # __ZnwmSt19__type_descriptor_t (typed allocation ABI) which
     # macOS 14's system libc++ doesn't provide, causing dyld to abort.

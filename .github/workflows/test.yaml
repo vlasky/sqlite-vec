@@ -53,7 +53,7 @@ jobs:
           name: sqlite-vec-macos-x86_64-extension
           path: dist/*
   build-macos-aarch64-extension:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -157,7 +157,7 @@ jobs:
               name: ios-arm64,
               target: arm64-apple-ios,
               sdk: iphoneos,
-              runner: macos-14,
+              runner: macos-15,
             },
             #{
             #  name: ios-x86_64,
@@ -169,13 +169,13 @@ jobs:
               name: ios-simulator-arm64,
               target: arm64-apple-ios-simulator,
               sdk: iphonesimulator,
-              runner: macos-14,
+              runner: macos-15,
             },
             {
               name: ios-simulator-x86_64,
               target: x86_64-apple-ios-simulator,
               sdk: iphonesimulator,
-              runner: macos-14,
+              runner: macos-15,
             },
           ]
     steps:
