@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 > [!NOTE]
 > This is a community fork of [`asg017/sqlite-vec`](https://github.com/asg017/sqlite-vec) created to merge pending upstream PRs and provide continued support while the original author is unavailable.
 
-`sqlite-vec` is a lightweight, fast vector search SQLite extension written in pure C with no dependencies. It's a pre-v1 project (current: v0.2.7-alpha) that provides vector similarity search capabilities for SQLite databases across all platforms where SQLite runs.
+`sqlite-vec` is a lightweight, fast vector search SQLite extension written in pure C with no dependencies. It's a pre-v1 project (current: v0.2.8-alpha) that provides vector similarity search capabilities for SQLite databases across all platforms where SQLite runs.
 
 Key features:
 - Supports float, int8, and binary vector types via `vec0` virtual tables
@@ -186,6 +186,7 @@ The Release workflow has never run on this fork (it triggers on a published GitH
 - It has drifted from `test.yaml`, where these are already fixed:
   - `android-actions/setup-android@v3` should be `@v4` (v3 installs the removed `tools` SDK package and fails during setup)
   - `runs-on: macos-13` should be `macos-15-intel` (retired runner)
+  - `runs-on: macos-14` and the iOS matrix's `runner: macos-14` should be `macos-15` (retired in November 2026; `test.yaml` and `fuzz.yaml` were moved to `macos-15` in v0.2.8-alpha)
   - `runs-on: windows-2019` should be `windows-2022` (retired runner)
   - the `ncruces/go-sqlite3` checkout should be pinned with `ref: v0.30.5` (the patch does not apply to later layouts)
 - The `dist` and `upload-crate` jobs publish to npm, RubyGems, PyPI and crates.io under upstream's package names, using secrets the fork does not have, and `build-ncruces-go` pushes to another repository with a personal access token.
@@ -225,6 +226,7 @@ Code uses preprocessor directives to select implementations. Distance calculatio
 - Vector format: JSON arrays `'[1,2,3]'` or raw bytes via helper functions
 
 **Fork-specific notes:**
+- Version v0.2.8-alpha includes: KNN filters that keep exactly the rows SQLite keeps, with typed columns, affinity, collations and UTF-16 ordering (#12), KNN arguments from a joined table (#14), NEON cosine kernels (#20) and NEON on Linux arm64 (#21), full scans through one blob handle per chunk (#17), a heap for each chunk's k nearest (#18), binary search for integer `in (...)` lists (#10), MMR running maximum (#11), skipping chunks the filters empty (#13), `rowid in (...)` fix for far-apart rowids (#9), DELETE validity fixes (#25, #26), static blob heap overflow and leak fixes (#19), GNU ld link order for `make cli` (#22), MSVC static header and `SQLITE_CORE` warning fixes (#24, #23); all from MayCXC
 - Version v0.2.7-alpha includes: cosine distance and `vec_normalize` fix for very small and very large float32 vectors (upstream #324), `xShadowName` now reports `vector_chunksNN` tables (partial, see "Identifying shadow tables" in ARCHITECTURE.md, upstream #320), `NPY_MAGIC` initialiser fix for newer GCC/Clang and C++ (upstream #321)
 - Version v0.2.6-alpha includes: upstream correctness fixes ported from v0.1.8-v0.1.10 (NEON int8 L2 overflow, DELETE on long text metadata, NaN/Inf input rejection, UB fixes), INSERT OR REPLACE support, empty-chunk reclamation on DELETE, NEON/AVX2 SIMD Hamming distance, libFuzzer targets with nightly CI
 - Version v0.2.5-alpha includes: MMR reranking via `mmr_lambda` hidden column (#6), memory leak fixes (#7), NULL/rejection handling for zero-magnitude vectors with cosine distance (#8), duplicate Rust package removal (#4)

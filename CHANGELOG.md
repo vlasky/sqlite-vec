@@ -2,6 +2,51 @@
 
 All notable changes to this community fork will be documented in this file.
 
+## [0.2.8-alpha] - 2026-10-29
+
+All changes in this release were contributed by MayCXC (Aaron Paterson), several ported from the photostructure fork and also proposed upstream.
+
+### Added
+
+- **KNN filters keep exactly the rows SQLite keeps** ([#12](https://github.com/vlasky/sqlite-vec/pull/12))
+  - vec0 declares its columns with types, as R-Tree does, and each filter gives the constraint's value the column's affinity and compares as SQLite does: `n = '5'` matches an integer 5, `n = 5.5` no longer matches 5, every number sorts before any text, and NULL matches nothing
+  - Text compares under the constraint's collation (`BINARY`, `NOCASE` or `RTRIM`; any other is an error) and, in a UTF-16 database, in the order SQLite's BINARY collation uses there. `t < ?` bound to NULL no longer crashes, and comparisons with a text of exactly 12 bytes no longer fail with "Could not filter metadata fields"
+  - `LIKE` and `GLOB` match as SQLite's built-in functions do, honour `PRAGMA case_sensitive_like`, and are 2 to 15x faster, as are text ranges; `rowid in (...)` and text id lookups take values as SQLite's own lookups do
+  - `!=` and `IS NOT` under `NOCASE` or `RTRIM`, and `LIKE` and `GLOB`, are checked again by SQLite after the k nearest rows are chosen, so such a query can return fewer than `k` rows. See the metadata section of the vec0 documentation for this and the other documented limits
+  - `PRAGMA table_xinfo` on a vec0 table now reports column types
+- **A KNN query's vector, `k` and `mmr_lambda` can come from a joined table** ([#14](https://github.com/vlasky/sqlite-vec/pull/14))
+  - `select ... from requests r join v on v.embedding match r.q and v.k = r.n` runs one KNN per request row; `k in (2, 3)` and expressions such as `k = w.n + 0` work too
+  - `xBestIndex` refuses a plan in which another table would have to supply an argument after vec0 is scanned, so SQLite picks a join order that supplies it. That refusal needs SQLite 3.26.0 or later; older libraries keep the plans they had
+  - A cycle, where the table supplying the argument itself reads vec0, now fails with "no query solution" instead of silently returning nothing
+  - A lookup join's result is plan dependent: after `ANALYZE` SQLite may run the KNN once per joined row, so a global k needs the KNN in a subquery or CTE. See ARCHITECTURE.md
+- **NEON cosine distance for float and int8 vectors** ([#20](https://github.com/vlasky/sqlite-vec/pull/20)) - ports upstream's kernels with double accumulation, about 3x faster for float and 5x for int8 on Apple Silicon, identical results to the scalar loops for every tested input
+- **NEON on Linux arm64** ([#21](https://github.com/vlasky/sqlite-vec/pull/21))
+  - The Makefile enables NEON when the compiler targets aarch64 Linux, and the NEON code now compiles with GCC. `OMIT_SIMD=1` still builds the scalar version
+  - A 100,000-row `float[768]` KNN query takes about 33 ms instead of 77 ms with GCC 14. Float L2 distances can differ from earlier Linux arm64 builds in the last digits, as they already did on macOS arm64, so rows with nearly equal distances may change order
+  - A new CI job runs the test suite on `ubuntu-24.04-arm`
+
+### Changed
+
+- **Full scans read vectors through one blob handle per chunk** ([#17](https://github.com/vlasky/sqlite-vec/pull/17)) - `select ... from v` without a MATCH opened and closed a blob per row; a file-backed 10,000-row `float[768]` scan now takes about 12 ms instead of 760 ms. Each row's position is still looked up when it is read, so a row deleted or moved during the scan reports an error or its new vector rather than stale data
+- **Each chunk's k nearest rows are selected with a heap** ([#18](https://github.com/vlasky/sqlite-vec/pull/18)) instead of k passes over the chunk's distances; same rows and order as before, with a NaN distance ranking last across chunks as it already did within one
+- **Integer metadata `in (...)` lists are binary-searched** ([#10](https://github.com/vlasky/sqlite-vec/pull/10)) - a 10,000-value list on 100,000 rows takes 6.5 ms instead of 322 ms
+- **MMR reranking keeps each candidate's similarity to the selection as a running maximum** ([#11](https://github.com/vlasky/sqlite-vec/pull/11)) - identical results, about 25x less distance work for `k = 50`
+- **A chunk's vectors are not read when the KNN filters keep none of its rows** ([#13](https://github.com/vlasky/sqlite-vec/pull/13)) - a filtered KNN over 120,000 vectors in 130 chunks runs in about 60 ms instead of 105 ms
+- **DELETE reads the chunk's validity bitmap through the handle it already holds** ([#26](https://github.com/vlasky/sqlite-vec/pull/26)), and only when the row's byte went to zero, about 8% fewer instructions per DELETE. A chunk that looked empty is checked once more before it is reclaimed, since a trigger on a shadow table can refill it during the DELETE
+
+### Fixed
+
+- **Static blobs: a heap overflow and three leaks** ([#19](https://github.com/vlasky/sqlite-vec/pull/19))
+  - A `vec_static_blob_entries` KNN over a blob whose vector count is a multiple of 8 read one byte past its candidate bitmap
+  - Registered blob names, a query's KNN results, and the results of a cursor filtered again without being closed (the inner loop of a join) were never freed
+- **Embedded NUL bytes in a text `IN (...)` value read past the copied value** (with [#12](https://github.com/vlasky/sqlite-vec/pull/12))
+- **`rowid in (...)` on KNN queries with rowids far apart** ([#9](https://github.com/vlasky/sqlite-vec/pull/9)) - the comparator returned the `int` truncation of an `i64` difference, so rowids exactly 2^32 apart compared equal (a row not in the list matched) and larger differences changed sign, leaving the sorted list out of order and missing rows that were in it
+- **`vec_distance_l2()` on int8 vectors of 33,026 or more elements returned NULL on NEON builds** (with [#21](https://github.com/vlasky/sqlite-vec/pull/21)) - the kernel summed the squares in 32 bits; it now sums in 64 bits. `vec0` tables, limited to 8,192 dimensions, were not affected
+- **DELETE accepted a row whose validity bit was already clear** ([#25](https://github.com/vlasky/sqlite-vec/pull/25)) - the check tested every higher bit in the same byte as well as the row's own; only a damaged `_chunks` table can produce such a row
+- **`make cli` failed to link with GNU ld** ([#22](https://github.com/vlasky/sqlite-vec/pull/22)) - `-ldl -lm` came before the archives that need them
+- **Static builds with MSVC failed on `SQLITE_VEC_API`** ([#24](https://github.com/vlasky/sqlite-vec/pull/24)) - the header applied a GCC visibility attribute on every compiler; it is now applied only under GCC and Clang outside Windows
+- **Unused-parameter warnings under `SQLITE_CORE`** ([#23](https://github.com/vlasky/sqlite-vec/pull/23)) - the init functions' `pApi` is marked unused when the file is compiled into an application
+
 ## [0.2.7-alpha] - 2026-10-05
 
 ### Fixed
