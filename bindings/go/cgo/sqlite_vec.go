@@ -1,6 +1,8 @@
 package sqlite_vec
 
 // #cgo CFLAGS: -DSQLITE_CORE
+// #cgo amd64 CFLAGS: -DSQLITE_VEC_ENABLE_AVX
+// #cgo arm64,!windows CFLAGS: -DSQLITE_VEC_ENABLE_NEON
 // #cgo LDFLAGS: -lm
 // #include "../../../sqlite-vec.c"
 // #include <sqlite3.h>

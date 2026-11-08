@@ -170,9 +170,54 @@ enum VectorElementType {
 
 #ifdef SQLITE_VEC_ENABLE_AVX
 #include <immintrin.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#define PORTABLE_ALIGN32 __declspec(align(32))
+#define PORTABLE_ALIGN64 __declspec(align(64))
+// MSVC compiles AVX intrinsics in any function whatever /arch says, so the
+// kernels need no attribute, and it has no __builtin_cpu_supports().
+#define VEC_TARGET_AVX
+#define VEC_TARGET_AVX2
+static int vec_cpu_supports_avx(int avx2) {
+  int info[4];
+  __cpuid(info, 0);
+  int max_leaf = info[0];
+  if (max_leaf < 1) {
+    return 0;
+  }
+  __cpuid(info, 1);
+  // AVX needs the CPU flag and an operating system that saves the YMM
+  // registers: OSXSAVE set, and XCR0 bits 1 and 2 set.
+  if (!((info[2] >> 27) & 1) || !((info[2] >> 28) & 1)) {
+    return 0;
+  }
+  if ((_xgetbv(0) & 6) != 6) {
+    return 0;
+  }
+  if (!avx2) {
+    return 1;
+  }
+  if (max_leaf < 7) {
+    return 0;
+  }
+  __cpuidex(info, 7, 0);
+  return (info[1] >> 5) & 1;
+}
+#define VEC_CPU_SUPPORTS_AVX() vec_cpu_supports_avx(0)
+#define VEC_CPU_SUPPORTS_AVX2() vec_cpu_supports_avx(1)
+#else
 #define PORTABLE_ALIGN32 __attribute__((aligned(32)))
 #define PORTABLE_ALIGN64 __attribute__((aligned(64)))
+// Only the kernels are compiled for AVX, through their target attribute, and
+// they run only when the CPU supports them, so the file needs no -mavx and
+// the same binary runs on any x86-64 CPU.
+#define VEC_TARGET_AVX __attribute__((target("avx")))
+#define VEC_TARGET_AVX2 __attribute__((target("avx2")))
+#define VEC_CPU_SUPPORTS_AVX() __builtin_cpu_supports("avx")
+#define VEC_CPU_SUPPORTS_AVX2() __builtin_cpu_supports("avx2")
+#endif
 
+VEC_TARGET_AVX
 static f32 l2_sqr_float_avx(const void *pVect1v, const void *pVect2v,
                             const void *qty_ptr) {
   f32 *pVect1 = (f32 *)pVect1v;
@@ -693,13 +738,20 @@ static double l2_sqr_float_double(const f32 *a, const f32 *b, size_t qty) {
 static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
   size_t qty = *(const size_t *)d;
   f32 sum;
+#ifdef SQLITE_VEC_ENABLE_AVX
+  // checked once; a second thread repeating the check writes the same value
+  static int has_avx = -1;
+  if (has_avx < 0) {
+    has_avx = VEC_CPU_SUPPORTS_AVX();
+  }
+#endif
 #ifdef SQLITE_VEC_ENABLE_NEON
   if (qty > 16) {
     sum = l2_sqr_float_neon(a, b, d);
   } else
 #endif
 #ifdef SQLITE_VEC_ENABLE_AVX
-  if (qty % 16 == 0) {
+  if (has_avx && qty % 16 == 0) {
     sum = l2_sqr_float_avx(a, b, d);
   } else
 #endif
@@ -1005,11 +1057,12 @@ static f32 distance_hamming_neon(const u8 *a, const u8 *b, size_t n_bytes) {
 }
 #endif
 
-#if defined(SQLITE_VEC_ENABLE_AVX) && defined(__AVX2__)
+#ifdef SQLITE_VEC_ENABLE_AVX
 /**
  * AVX2 Hamming distance using VPSHUFB-based popcount.
  * Processes 32 bytes (256 bits) per iteration.
  */
+VEC_TARGET_AVX2
 static f32 distance_hamming_avx2(const u8 *a, const u8 *b, size_t n_bytes) {
   const u8 *pEnd = a + n_bytes;
 
@@ -1086,8 +1139,12 @@ static f32 distance_hamming(const void *a, const void *b, const void *d) {
     return distance_hamming_neon((const u8 *)a, (const u8 *)b, n_bytes);
   }
 #endif
-#if defined(SQLITE_VEC_ENABLE_AVX) && defined(__AVX2__)
-  if (n_bytes >= 32) {
+#ifdef SQLITE_VEC_ENABLE_AVX
+  static int has_avx2 = -1;
+  if (has_avx2 < 0) {
+    has_avx2 = VEC_CPU_SUPPORTS_AVX2();
+  }
+  if (has_avx2 && n_bytes >= 32) {
     return distance_hamming_avx2((const u8 *)a, (const u8 *)b, n_bytes);
   }
 #endif
@@ -2385,6 +2442,8 @@ enum Vec0TokenType {
   TOKEN_TYPE_RBRACKET,
   TOKEN_TYPE_PLUS,
   TOKEN_TYPE_EQ,
+  // a "quoted name"; start and end include the quotes
+  TOKEN_TYPE_QUOTED_IDENTIFIER,
 };
 struct Vec0Token {
   enum Vec0TokenType token_type;
@@ -2444,6 +2503,23 @@ int vec0_token_next(char *start, char *end, struct Vec0Token *out) {
       out->end = ptr;
       out->token_type = TOKEN_TYPE_IDENTIFIER;
       return VEC0_TOKEN_RESULT_SOME;
+    } else if (curr == '"') {
+      // a double-quoted name, as SQLite accepts for any identifier. The quote
+      // itself cannot appear inside ("" escaping is not supported).
+      char *start = ptr;
+      ptr++;
+      while (ptr < end && *ptr != '"') {
+        ptr++;
+      }
+      if (ptr >= end || ptr == start + 1) {
+        // unterminated, or empty
+        return VEC0_TOKEN_RESULT_ERROR;
+      }
+      ptr++;
+      out->start = start;
+      out->end = ptr;
+      out->token_type = TOKEN_TYPE_QUOTED_IDENTIFIER;
+      return VEC0_TOKEN_RESULT_SOME;
     } else if (is_digit(curr)) {
       char *start = ptr;
       while (ptr < end && (is_digit(*ptr))) {
@@ -2458,6 +2534,23 @@ int vec0_token_next(char *start, char *end, struct Vec0Token *out) {
     }
   }
   return VEC0_TOKEN_RESULT_EOF;
+}
+
+// Whether a token can name a column: a bare or a double-quoted identifier.
+static int vec0_token_is_name(struct Vec0Token *token) {
+  return token->token_type == TOKEN_TYPE_IDENTIFIER ||
+         token->token_type == TOKEN_TYPE_QUOTED_IDENTIFIER;
+}
+
+// The name a token holds, without the quotes of a quoted identifier.
+static void vec0_token_name(struct Vec0Token *token, char **name, int *length) {
+  if (token->token_type == TOKEN_TYPE_QUOTED_IDENTIFIER) {
+    *name = token->start + 1;
+    *length = token->end - token->start - 2;
+  } else {
+    *name = token->start;
+    *length = token->end - token->start;
+  }
 }
 
 struct Vec0Scanner {
@@ -2550,12 +2643,11 @@ int vec0_parse_partition_key_definition(const char *source, int source_length,
   // Check first token is identifier, will be the column name
   int rc = vec0_scanner_next(&scanner, &token);
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      !vec0_token_is_name(&token)) {
     return SQLITE_EMPTY;
   }
 
-  column_name = token.start;
-  column_name_length = token.end - token.start;
+  vec0_token_name(&token, &column_name, &column_name_length);
 
   // Check the next token matches "text" or "integer", as column type
   rc = vec0_scanner_next(&scanner, &token);
@@ -2633,12 +2725,11 @@ int vec0_parse_auxiliary_column_definition(const char *source, int source_length
 
   rc = vec0_scanner_next(&scanner, &token);
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      !vec0_token_is_name(&token)) {
     return SQLITE_EMPTY;
   }
 
-  column_name = token.start;
-  column_name_length = token.end - token.start;
+  vec0_token_name(&token, &column_name, &column_name_length);
 
   // Check the next token matches "text" or "integer", as column type
   rc = vec0_scanner_next(&scanner, &token);
@@ -2705,12 +2796,11 @@ int vec0_parse_metadata_column_definition(const char *source, int source_length,
 
   rc = vec0_scanner_next(&scanner, &token);
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      !vec0_token_is_name(&token)) {
     return SQLITE_EMPTY;
   }
 
-  column_name = token.start;
-  column_name_length = token.end - token.start;
+  vec0_token_name(&token, &column_name, &column_name_length);
 
   // Check the next token matches a valid metadata type
   rc = vec0_scanner_next(&scanner, &token);
@@ -2765,12 +2855,11 @@ int vec0_parse_primary_key_definition(const char *source, int source_length,
   // Check first token is identifier, will be the column name
   int rc = vec0_scanner_next(&scanner, &token);
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      !vec0_token_is_name(&token)) {
     return SQLITE_EMPTY;
   }
 
-  column_name = token.start;
-  column_name_length = token.end - token.start;
+  vec0_token_name(&token, &column_name, &column_name_length);
 
   // Check the next token matches "text" or "integer", as column type
   rc = vec0_scanner_next(&scanner, &token);
@@ -2895,12 +2984,11 @@ int vec0_parse_vector_column(const char *source, int source_length,
   rc = vec0_scanner_next(&scanner, &token);
 
   if (rc != VEC0_TOKEN_RESULT_SOME ||
-      token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      !vec0_token_is_name(&token)) {
     return SQLITE_EMPTY;
   }
 
-  name = token.start;
-  nameLength = token.end - token.start;
+  vec0_token_name(&token, &name, &nameLength);
 
   // vector column type comes next: float, int, or bit
   rc = vec0_scanner_next(&scanner, &token);

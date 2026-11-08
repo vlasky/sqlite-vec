@@ -80,7 +80,7 @@ jobs:
         shell: bash
       - run: make sqlite-vec.h
       - run: mkdir dist
-      - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /LD sqlite-vec.c -o dist/vec0.dll
+      - run: cl.exe /fPIC -shared /W4 /Ivendor/ /O2 /DSQLITE_VEC_ENABLE_AVX /LD sqlite-vec.c -o dist/vec0.dll
       - run: uv sync --directory tests
       - run: make test-loadable python=./tests/.venv/Scripts/python.exe
         shell: bash
@@ -97,10 +97,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           version: "latest"
-      - run: sudo apt-get install gcc-arm-linux-gnueabihf
+      - run: sudo apt-get install gcc-aarch64-linux-gnu
       - run: ./scripts/vendor.sh
       - run: make sqlite-vec.h
-      - run: make CC=arm-linux-gnueabihf-gcc loadable static
+      - run: make CC=aarch64-linux-gnu-gcc loadable static
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-vec-linux-aarch64-extension
@@ -132,8 +132,8 @@ jobs:
           distribution: "temurin"
       - uses: android-actions/setup-android@v4
       - run: |
-          sdkmanager --install "ndk;27.0.12077973"
-          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> $GITHUB_ENV
+          sdkmanager --install "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> $GITHUB_ENV
       - run: |
           ls $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/
           ls $ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin
@@ -142,7 +142,8 @@ jobs:
           make CC=${{ matrix.platforms.cc }} \
              AR=llvm-ar \
              RANLIB=llvm-ranlib \
-             STRIP=llvm-strip loadable
+             STRIP=llvm-strip \
+             LDFLAGS="-Wl,-z,max-page-size=16384" loadable
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-vec-android-${{ matrix.platforms.name }}-extension

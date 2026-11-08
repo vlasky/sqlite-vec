@@ -17,6 +17,20 @@ Fixes for open upstream bug reports, checked against this fork and found to appl
 - **`vec_each()` reads bit vectors least significant bit first** (ports upstream PR [#323](https://github.com/asg017/sqlite-vec/pull/323) by ariannamethod) - matching `vec_to_json()`, `vec_quantize_binary()` and the stored bitmaps; the API reference example is corrected
 - **`vec_distance_l1()` on int8 vectors no longer wraps at 2^31** (upstream [#362](https://github.com/asg017/sqlite-vec/issues/362), ports upstream PR [#365](https://github.com/asg017/sqlite-vec/pull/365) by flysheep-ai) - the sum is 64-bit and the NEON kernel is only used within its 32-bit range; vec0 columns were never affected
 - **Vector column types must match exactly** (ports upstream PR [#310](https://github.com/asg017/sqlite-vec/pull/310) by stumpylog) - `float16[4]`, `floaty[4]` and `bitcoin[8]` were accepted as `float` and `bit` by a prefix match; `float32` stays accepted
+- **`make cli` compiles sqlite-vec.c with `-O3`** (upstream [#290](https://github.com/asg017/sqlite-vec/issues/290), after PR [#292](https://github.com/asg017/sqlite-vec/pull/292) by yurivict) - the CLI's copy of the extension was built with no optimisation flag at all; user `CFLAGS` now also reach the vendored `sqlite3.c` and `shell.c` builds, and `-O3` precedes them so they can be overridden
+- **`make sqlite-vec.h` on FreeBSD** (upstream [#286](https://github.com/asg017/sqlite-vec/issues/286), after PR [#282](https://github.com/asg017/sqlite-vec/pull/282) by lin72h) - the version parts are computed by Make, not by shell assignments that FreeBSD's `/bin/sh` expands before setting, and the recipe fails if a version macro comes out blank
+- **CI builds a 64-bit `linux-aarch64` artifact** - the cross-compile job used `arm-linux-gnueabihf-gcc`, a 32-bit ARM compiler, so the artifact labelled aarch64 was 32-bit (upstream fixed the same job in asg017/sqlite-vec@cc7c29e)
+- **CI Android builds are 16KB page aligned** - the Android job never passed the `-Wl,-z,max-page-size=16384` link flag that the fork added support for in v0.2.3-alpha, and now uses NDK 29 (after PR [#249](https://github.com/asg017/sqlite-vec/pull/249) by DarkJoker360)
+- **Licence identifiers** (upstream asg017/sqlite-vec@5778fec) - `sqlite-dist.toml` said `MIT OR Apache`, which is not a valid SPDX expression, and the Rust crate used the deprecated `MIT/Apache-2.0` form
+
+### Added
+
+- **Double-quoted column names in `CREATE VIRTUAL TABLE ... USING vec0(...)`** (upstream [#170](https://github.com/asg017/sqlite-vec/issues/170), after PR [#296](https://github.com/asg017/sqlite-vec/pull/296) by garnacho) - `"my vec" float[2]`, `"order" integer` or `+"the note" text` are accepted for every column kind, so reserved words and names with spaces work as they do in SQLite; a quote inside the name (`"a""b"`), an empty `""` and an unterminated quote are rejected
+
+### Changed
+
+- **AVX kernels are chosen at run time** (upstream [#302](https://github.com/asg017/sqlite-vec/issues/302), after PR [#307](https://github.com/asg017/sqlite-vec/pull/307) by stumpylog) - the AVX L2 and AVX2 Hamming kernels are compiled with per-function target attributes and used only when the running CPU supports them (`__builtin_cpu_supports` on GCC and Clang, `__cpuid` and `_xgetbv` on MSVC), instead of compiling the whole file with `-mavx -mavx2` and probing the build host. One x86_64 binary now runs on any x86-64 CPU, so prebuilt binaries cannot SIGILL on pre-AVX machines, and `SQLITE_VEC_ENABLE_AVX` is now set for every x86_64 target: Linux builds, the Windows CI build, the Rust binding (`build.rs`) and the Go CGO binding, which all ran scalar code before; the Rust and Go bindings also enable NEON on arm64
+- **npm package installs on Android (Termux)** (after PR [#312](https://github.com/asg017/sqlite-vec/pull/312) by kore4lyf) - `android` is listed in `package.json`'s `os` field
 
 ## [0.2.8-alpha] - 2026-10-29
 

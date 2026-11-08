@@ -2,6 +2,11 @@
 COMMIT=$(shell git rev-parse HEAD)
 VERSION=$(shell cat VERSION)
 DATE=$(shell date +'%FT%TZ%z')
+# computed here, not inside the sqlite-vec.h recipe: on FreeBSD's /bin/sh the
+# variable assignments on one command line are all expanded before any is set
+VERSION_MAJOR=$(shell cut -d. -f1 VERSION)
+VERSION_MINOR=$(shell cut -d. -f2 VERSION)
+VERSION_PATCH=$(shell cut -d. -f3 VERSION | cut -d- -f1)
 
 INSTALL_PREFIX ?= /usr/local
 INSTALL_LIB_DIR ?= $(INSTALL_PREFIX)/lib
@@ -54,27 +59,25 @@ PYTHON=python3
 endif
 
 ifndef OMIT_SIMD
-	# host-based detection is wrong when cross-compiling, e.g. for Android
+	# SIMD follows the compiler's target, not the host: 32-bit Raspberry Pi
+	# OS runs a 64-bit kernel, so uname says aarch64 while gcc targets 32-bit
+	# ARM, and cross-compiles (Android, cosmocc) target something else again.
+	# Android builds stay scalar.
 	ifeq ($(findstring android,$(CC)),)
-	ifeq ($(shell uname -sm),Darwin x86_64)
-	CFLAGS += -mavx -DSQLITE_VEC_ENABLE_AVX
-	# pre-2013 Intel Macs support AVX but not AVX2, so check the host CPU
-	ifeq ($(shell sysctl -n hw.optional.avx2_0 2>/dev/null),1)
-	CFLAGS += -mavx2
-	endif
-	endif
-	ifeq ($(shell uname -sm),Darwin arm64)
-	CFLAGS += -mcpu=apple-m1 -DSQLITE_VEC_ENABLE_NEON
+	TARGET_MACHINE=$(shell $(CC) -dumpmachine 2>/dev/null)
+	# The AVX kernels are compiled with per-function target attributes and
+	# used only when the running CPU supports them, so no -mavx: the same
+	# binary runs on any x86-64 CPU.
+	ifneq ($(filter x86_64-% amd64-%,$(TARGET_MACHINE)),)
+	CFLAGS += -DSQLITE_VEC_ENABLE_AVX
 	endif
 	# NEON is in the arm64 baseline (GCC and Clang define __ARM_NEON for
-	# aarch64 with no -m flag), so the Linux build needs only the define. It
-	# follows the compiler's target, not uname: 32-bit Raspberry Pi OS runs a
-	# 64-bit kernel, so uname says aarch64 while gcc targets 32-bit ARM, which
-	# lacks the AArch64-only intrinsics the NEON kernels use.
-	ifeq ($(shell uname -s),Linux)
-	ifneq ($(filter aarch64-%,$(shell $(CC) -dumpmachine)),)
+	# aarch64 with no -m flag), so it needs only the define.
+	ifneq ($(filter aarch64-% arm64-%,$(TARGET_MACHINE)),)
 	CFLAGS += -DSQLITE_VEC_ENABLE_NEON
 	endif
+	ifneq ($(filter arm64-apple-%,$(TARGET_MACHINE)),)
+	CFLAGS += -mcpu=apple-m1
 	endif
 	endif
 endif
@@ -132,8 +135,8 @@ $(TARGET_LOADABLE): sqlite-vec.c sqlite-vec.h $(prefix)
 		$(EXT_LDFLAGS) $(LDLIBS)
 
 $(TARGET_STATIC): sqlite-vec.c sqlite-vec.h $(prefix) $(OBJS_DIR)
-	$(CC) -Ivendor/ -fvisibility=hidden $(CFLAGS) $(EXT_CFLAGS) -DSQLITE_CORE -DSQLITE_VEC_STATIC \
-	-O3 -c  $< -o $(OBJS_DIR)/vec.o
+	$(CC) -Ivendor/ -fvisibility=hidden -O3 $(CFLAGS) $(EXT_CFLAGS) -DSQLITE_CORE -DSQLITE_VEC_STATIC \
+	-c  $< -o $(OBJS_DIR)/vec.o
 	$(AR) rcs $@ $(OBJS_DIR)/vec.o
 
 $(TARGET_STATIC_H): sqlite-vec.h $(prefix)
@@ -141,7 +144,7 @@ $(TARGET_STATIC_H): sqlite-vec.h $(prefix)
 
 
 $(OBJS_DIR)/sqlite3.o: vendor/sqlite3.c $(OBJS_DIR)
-	$(CC) -c -g3 -O3 -DSQLITE_EXTRA_INIT=core_init -DSQLITE_CORE -DSQLITE_ENABLE_STMT_SCANSTATUS -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_ENABLE_EXPLAIN_COMMENTS -I./vendor $< -o $@
+	$(CC) -c -g3 -O3 $(EXT_CFLAGS) -DSQLITE_EXTRA_INIT=core_init -DSQLITE_CORE -DSQLITE_ENABLE_STMT_SCANSTATUS -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_ENABLE_EXPLAIN_COMMENTS -I./vendor $< -o $@
 
 $(LIBS_DIR)/sqlite3.a: $(OBJS_DIR)/sqlite3.o $(LIBS_DIR)
 	$(AR) rcs $@ $<
@@ -154,13 +157,14 @@ $(OBJS_DIR)/shell.o: $(BUILD_DIR)/shell-new.c $(OBJS_DIR)
 		-I./vendor \
 		-DSQLITE_ENABLE_STMT_SCANSTATUS -DSQLITE_ENABLE_BYTECODE_VTAB -DSQLITE_ENABLE_EXPLAIN_COMMENTS \
 		-DEXTRA_TODO="\"CUSTOMBUILD:sqlite-vec\n\"" \
+		$(EXT_CFLAGS) \
 		$< -o $@
 
 $(LIBS_DIR)/shell.a: $(OBJS_DIR)/shell.o $(LIBS_DIR)
 	$(AR) rcs $@ $<
 
 $(OBJS_DIR)/sqlite-vec.o: sqlite-vec.c $(OBJS_DIR)
-	$(CC) -c -g3 -fvisibility=hidden -Ivendor/ -I./ $(CFLAGS) $(EXT_CFLAGS) $< -o $@
+	$(CC) -c -g3 -O3 -fvisibility=hidden -Ivendor/ -I./ $(CFLAGS) $(EXT_CFLAGS) $< -o $@
 
 $(LIBS_DIR)/sqlite-vec.a: $(OBJS_DIR)/sqlite-vec.o $(LIBS_DIR)
 	$(AR) rcs $@ $<
@@ -182,13 +186,17 @@ $(TARGET_CLI): sqlite-vec.h $(LIBS_DIR)/sqlite-vec.a $(LIBS_DIR)/shell.a $(LIBS_
 
 
 sqlite-vec.h: sqlite-vec.h.tmpl VERSION
-	VERSION=$(shell cat VERSION) \
+	VERSION=$(VERSION) \
 	DATE=$(shell date -r VERSION +'%FT%TZ%z') \
 	SOURCE=$(shell git log -n 1 --pretty=format:%H -- VERSION) \
-	VERSION_MAJOR=$$(echo $$VERSION | cut -d. -f1) \
-	VERSION_MINOR=$$(echo $$VERSION | cut -d. -f2) \
-	VERSION_PATCH=$$(echo $$VERSION | cut -d. -f3 | cut -d- -f1) \
+	VERSION_MAJOR=$(VERSION_MAJOR) \
+	VERSION_MINOR=$(VERSION_MINOR) \
+	VERSION_PATCH=$(VERSION_PATCH) \
 	envsubst < $< > $@
+	grep -Eq '^#define SQLITE_VEC_VERSION "[^"]+"' $@
+	grep -Eq '^#define SQLITE_VEC_VERSION_MAJOR [0-9]+' $@
+	grep -Eq '^#define SQLITE_VEC_VERSION_MINOR [0-9]+' $@
+	grep -Eq '^#define SQLITE_VEC_VERSION_PATCH [0-9]+' $@
 
 clean:
 	rm -rf dist
@@ -199,7 +207,7 @@ format: $(FORMAT_FILES)
 	clang-format -i $(FORMAT_FILES)
 	black tests/test-loadable.py
 
-lint: SHELL:=/bin/bash
+lint: SHELL:=$(shell command -v bash || echo /bin/bash)
 lint:
 	diff -u <(cat $(FORMAT_FILES)) <(clang-format $(FORMAT_FILES))
 

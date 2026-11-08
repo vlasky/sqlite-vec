@@ -3153,3 +3153,44 @@ def test_vec0_write_through_knn_plan():
         {"rowid": 2, "n": 1},
         {"rowid": 3, "n": 0},
     ]
+
+
+def test_vec0_quoted_identifiers():
+    # Column names in double quotes, as SQLite allows everywhere else, used to
+    # fail with "Could not parse". https://github.com/asg017/sqlite-vec/issues/170,
+    # after upstream PR asg017/sqlite-vec#296.
+    db.execute(
+        '''create virtual table "t q" using vec0(
+          "id" text primary key,
+          "my vec" float[2],
+          "order" integer,
+          +"the note" text,
+          "tenant" integer partition key,
+          "Year" integer
+        )'''
+    )
+    names = [r["name"] for r in execute_all(db, 'pragma table_xinfo("t q")')]
+    assert names[:6] == ["id", "my vec", "order", "the note", "tenant", "Year"]
+    db.execute(
+        'insert into "t q"(id, "my vec", "order", "the note", tenant, "Year") values (?, ?, ?, ?, ?, ?)',
+        ["a", "[1,1]", 1, "n", 7, 2020],
+    )
+    db.execute(
+        'insert into "t q"(id, "my vec", "order", "the note", tenant, "Year") values (?, ?, ?, ?, ?, ?)',
+        ["b", "[2,2]", 2, "m", 8, 2021],
+    )
+    knn = 'select id, "order", "the note", tenant, "Year" from "t q" where "my vec" match ? and k = 2 and tenant = ? and "order" = ?'
+    assert execute_all(db, knn, ["[1,1]", 7, 1]) == [
+        {"id": "a", "order": 1, "the note": "n", "tenant": 7, "Year": 2020}
+    ]
+    db.execute('update "t q" set "order" = 3, "the note" = \'x\' where id = ?', ["a"])
+    assert execute_all(db, knn, ["[1,1]", 7, 3]) == [
+        {"id": "a", "order": 3, "the note": "x", "tenant": 7, "Year": 2020}
+    ]
+    db.execute('alter table "t q" rename to "t r"')
+    assert execute_all(db, 'select count(*) as n from "t r"') == [{"n": 2}]
+    # empty or containing a quote: rejected, not misread (an unterminated
+    # quote never gets past SQLite's own tokenizer)
+    for definition in ['"" float[2]', '"a""b" float[2]', '"v" float[2], "" integer']:
+        with pytest.raises(sqlite3.OperationalError, match="vec0 constructor error"):
+            db.execute(f"create virtual table bad using vec0({definition})")

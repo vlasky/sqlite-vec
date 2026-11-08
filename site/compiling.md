@@ -57,7 +57,7 @@ There are a few compilation options available for `sqlite-vec`, but they're curr
 
 The current compile-time flags are:
 
-- `SQLITE_VEC_ENABLE_AVX`, enables AVX CPU instructions for some vector search operations
-- `SQLITE_VEC_ENABLE_NEON`, enables NEON CPU instructions for some vector search operations
+- `SQLITE_VEC_ENABLE_AVX`, compiles AVX and AVX2 kernels for some vector search operations. They are used only when the running CPU supports them, so the flag is safe on any x86-64 build and needs no `-mavx`
+- `SQLITE_VEC_ENABLE_NEON`, enables NEON CPU instructions for some vector search operations (arm64 only)
 - `SQLITE_VEC_OMIT_FS`, removes some obsure SQL functions and features that use the filesystem, meant for some WASM builds where there's no available filesystem
 - `SQLITE_VEC_STATIC`, meant for statically linking `sqlite-vec` 

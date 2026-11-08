@@ -36,7 +36,8 @@ Run `./scripts/vendor.sh` first to download vendored dependencies (sqlite3.c, sh
 - Set `AR=` to use a different archiver (default: ar)
 
 **SIMD control:**
-- SIMD is auto-enabled on Darwin x86_64 (AVX), Darwin arm64 (NEON), and Linux arm64 (NEON)
+- SIMD follows the compiler's target (`$(CC) -dumpmachine`): x86_64 targets get `SQLITE_VEC_ENABLE_AVX`, arm64 targets get `SQLITE_VEC_ENABLE_NEON`; Android builds stay scalar
+- The AVX and AVX2 kernels carry per-function target attributes and are used only when the running CPU supports them, so no `-mavx` is passed and one x86_64 binary runs on any x86-64 CPU
 - Set `OMIT_SIMD=1` to disable SIMD optimizations
 
 ### Testing
@@ -212,10 +213,10 @@ def test_example(db):
 ### SIMD Optimizations
 
 SIMD is conditionally compiled based on platform:
-- `SQLITE_VEC_ENABLE_AVX` - x86_64 AVX instructions
-- `SQLITE_VEC_ENABLE_NEON` - ARM NEON instructions
+- `SQLITE_VEC_ENABLE_AVX` - x86_64 AVX and AVX2 kernels (`l2_sqr_float_avx`, `distance_hamming_avx2`), compiled with per-function target attributes (`VEC_TARGET_AVX`, `VEC_TARGET_AVX2`) and dispatched at run time through `VEC_CPU_SUPPORTS_AVX()` / `VEC_CPU_SUPPORTS_AVX2()` (`__builtin_cpu_supports` on GCC and Clang, `__cpuid` plus `_xgetbv` on MSVC), so the define is safe on any x86-64 build
+- `SQLITE_VEC_ENABLE_NEON` - ARM NEON instructions (part of the AArch64 baseline, no dispatch needed)
 
-Code uses preprocessor directives to select implementations. Distance calculations have both scalar and SIMD variants.
+Code uses preprocessor directives to select implementations. Distance calculations have both scalar and SIMD variants. The Rust binding's `build.rs` and the Go CGO `#cgo` lines set the same defines by target architecture.
 
 ## Important Notes
 

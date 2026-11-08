@@ -54,6 +54,22 @@ void test_vec0_token_next() {
   assert(token.token_type == TOKEN_TYPE_IDENTIFIER);
   assert(token.end - token.start == 6);
 
+  // Double-quoted identifier: the token includes the quotes
+  input = "\"my col\" rest";
+  rc = vec0_token_next(input, input + 13, &token);
+  assert(rc == VEC0_TOKEN_RESULT_SOME);
+  assert(token.token_type == TOKEN_TYPE_QUOTED_IDENTIFIER);
+  assert(token.start == input);
+  assert(token.end == input + 8);
+
+  // Unterminated or empty quotes are errors
+  input = "\"abc";
+  rc = vec0_token_next(input, input + 4, &token);
+  assert(rc == VEC0_TOKEN_RESULT_ERROR);
+  input = "\"\"";
+  rc = vec0_token_next(input, input + 2, &token);
+  assert(rc == VEC0_TOKEN_RESULT_ERROR);
+
   // Digit sequence
   input = "1234";
   rc = vec0_token_next(input, input + 4, &token);
