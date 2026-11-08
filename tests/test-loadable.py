@@ -3246,7 +3246,7 @@ def test_vec0_raw_blob_takes_column_type():
     # the wrong size is still parsed as before and rejected
     with _raises("Inserted vector for the \"a\" column is invalid: invalid float32 vector BLOB length. Must be divisible by 4, found 3"):
         db.execute("insert into t_raw(rowid, a, b, n) values (2, ?, ?, 0)", [bytes([1, 2, 3]), bytes([0, 0])])
-    with _raises("Dimension mismatch for inserted vector for the \"a\" column. Expected 4 dimensions but received 2."):
+    with _raises("Inserted vector for the \"a\" column is expected to be of type int8, but a float32 vector was provided."):
         db.execute("insert into t_raw(rowid, a, b, n) values (2, ?, ?, 0)", [bytes(8), bytes([0, 0])])
     # UPDATE ... FROM cannot flag the vector columns as unchanged, so their
     # stored blobs come back as plain blobs and must round-trip
