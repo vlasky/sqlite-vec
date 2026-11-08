@@ -97,6 +97,7 @@ def spread_args(args):
 
 
 FUNCTIONS = [
+    "vec0_partition_in",
     "vec_add",
     "vec_bit",
     "vec_debug",
@@ -3195,3 +3196,14 @@ def test_vec0_quoted_identifiers():
     for definition in ['"" float[2]', '"a""b" float[2]', '"v" float[2], "" integer']:
         with pytest.raises(sqlite3.OperationalError, match="vec0 constructor error"):
             db.execute(f"create virtual table bad using vec0({definition})")
+
+
+def test_vec0_partition_in():
+    # internal to the chunks query of KNN searches with a `part in (...)`
+    # constraint: the set arrives through sqlite3_bind_pointer(), so from SQL
+    # the first argument is never a set and the function is always false
+    assert execute_all(db, "select vec0_partition_in(?, 1) as r", [None]) == [{"r": 0}]
+    assert execute_all(db, "select vec0_partition_in(1, 1) as r") == [{"r": 0}]
+    assert execute_all(db, "select vec0_partition_in('a', 'a') as r") == [{"r": 0}]
+    with _raises("wrong number of arguments to function vec0_partition_in()"):
+        db.execute("select vec0_partition_in(1)")
