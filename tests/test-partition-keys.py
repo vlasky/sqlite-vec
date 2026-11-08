@@ -273,3 +273,17 @@ def test_update_without_point_lookup(db):
         with pytest.raises(sqlite3.OperationalError, match="UPDATE on partition key columns are not supported yet"):
             db.execute(sql)
     assert rows() == [(1, 1, 3, "x"), (2, 2, 4, "n"), (3, 3, 3, "x"), (4, 4, 4, "n")]
+
+
+def test_in_list_long(db):
+    # the list goes into the chunks query as literals, so it is not subject
+    # to SQLITE_LIMIT_VARIABLE_NUMBER (32,766 by default)
+    db.execute(
+        "create virtual table v using vec0(part integer partition key, s text partition key, a float[1], chunk_size=8)"
+    )
+    for rowid in range(1, 9):
+        db.execute("insert into v(rowid, part, s, a) values (?, ?, ?, ?)", [rowid, rowid * 10000, str(rowid), f"[{rowid}]"])
+    many = "with recursive n(x) as (select 1 union all select x + 1 from n where x < 50000) select x from n"
+    assert [r[0] for r in db.execute(f"select rowid from v where a match '[0]' and k = 3 and part in ({many})")] == [1, 2, 3]
+    assert [r[0] for r in db.execute(f"select rowid from v where a match '[0]' and k = 3 and s in ({many})")] == [1, 2, 3]
+    assert [r[0] for r in db.execute(f"select rowid from v where a match '[0]' and k = 3 and part in ({many}) and s in ({many})")] == [1, 2, 3]

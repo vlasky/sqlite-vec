@@ -713,6 +713,10 @@ static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
   // Ordinary vectors never take this path; identical ones (sum == 0) do,
   // harmlessly. Reported upstream as asg017/sqlite-vec#334 and #335.
   if (!(sum >= 16777216.0f * FLT_MIN) || sum == INFINITY) {
+    // identical vectors, the common way to a zero sum, need no second pass
+    if (sum == 0 && memcmp(a, b, qty * sizeof(f32)) == 0) {
+      return 0;
+    }
     return sqrt(l2_sqr_float_double((const f32 *)a, (const f32 *)b, qty));
   }
   return sqrt(sum);
@@ -2924,6 +2928,14 @@ int vec0_parse_vector_column(const char *source, int source_length,
   } else if (typeLength == 3 && sqlite3_strnicmp(token.start, "bit", 3) == 0) {
     elementType = SQLITE_VEC_ELEMENT_TYPE_BIT;
   } else {
+    // An unknown type followed by `[` was meant as a vector column, so it is
+    // an error here. Letting it fall through would hand `v float64[2]` to the
+    // metadata parser, which accepts float64 and ignores the rest, and a
+    // table reopened that way would read the wrong shadow tables.
+    rc = vec0_scanner_next(&scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_LBRACKET) {
+      return SQLITE_ERROR;
+    }
     return SQLITE_EMPTY;
   }
 
@@ -7112,35 +7124,67 @@ int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value
       break;
 #if COMPILER_SUPPORTS_VTAB_IN
      case VEC0_PARTITION_OPERATOR_IN: {
-      // One placeholder per list value. The collation goes on the column,
-      // where it applies to each comparison, not after the list.
+      // The list values go into the SQL as literals rather than parameters:
+      // a long `in (select ...)` list would otherwise run into
+      // SQLITE_LIMIT_VARIABLE_NUMBER. Each literal gets the column's type, as
+      // the `=` binding below gives its value, so values that can never match
+      // a stored value (NULL, blobs, non-integral numbers on an integer
+      // column) are left out. The collation goes on the column, where it
+      // applies to each comparison, not after the list.
       sqlite3_value *entry = NULL;
       int n = 0;
+      sqlite3_str *list = sqlite3_str_new(NULL);
       for (rc = sqlite3_vtab_in_first(argv[i], &entry); rc == SQLITE_OK && entry;
            rc = sqlite3_vtab_in_next(argv[i], &entry)) {
-        n++;
+        int type = sqlite3_value_type(entry);
+        if (type == SQLITE_NULL || type == SQLITE_BLOB) {
+          continue;
+        }
+        if (p->paritition_columns[partition_idx].type == SQLITE_TEXT) {
+          sqlite3_str_appendf(list, "%s%Q", n ? "," : "", sqlite3_value_text(entry));
+          n++;
+          continue;
+        }
+        type = sqlite3_value_numeric_type(entry);
+        if (type == SQLITE_INTEGER) {
+          sqlite3_str_appendf(list, "%s%lld", n ? "," : "", sqlite3_value_int64(entry));
+          n++;
+        } else if (type == SQLITE_FLOAT) {
+          double r = sqlite3_value_double(entry);
+          // only an integral value can equal a stored integer
+          if (r >= -9223372036854775808.0 && r < 9223372036854775808.0 &&
+              r == (double)(i64)r) {
+            sqlite3_str_appendf(list, "%s%lld", n ? "," : "", (i64)r);
+            n++;
+          }
+        } else {
+          sqlite3_str_appendf(list, "%s%Q", n ? "," : "", sqlite3_value_text(entry));
+          n++;
+        }
       }
-      if (rc != SQLITE_DONE) {
+      // sqlite3_str_finish() returns NULL for an empty list as well as on
+      // error, so the error code is read first
+      int listRc = sqlite3_str_errcode(list);
+      char *zList = sqlite3_str_finish(list);
+      if (rc != SQLITE_DONE || listRc != SQLITE_OK) {
+        sqlite3_free(zList);
         char * zSql = sqlite3_str_finish(s);
         sqlite3_free(zSql);
-        return rc;
+        return rc != SQLITE_DONE ? rc : listRc;
       }
       if (n == 0) {
-        // `in ()` matches nothing
+        // nothing listed that could match
         sqlite3_str_appendall(s, " 0 ");
-        continue;
+      } else {
+        sqlite3_str_appendf(s, " partition%02d ", partition_idx);
+        if(collation == VEC0_COLLATION_NOCASE) {
+          sqlite3_str_appendall(s, "COLLATE NOCASE ");
+        } else if(collation == VEC0_COLLATION_RTRIM) {
+          sqlite3_str_appendall(s, "COLLATE RTRIM ");
+        }
+        sqlite3_str_appendf(s, "IN (%s) ", zList);
       }
-      sqlite3_str_appendf(s, " partition%02d ", partition_idx);
-      if(collation == VEC0_COLLATION_NOCASE) {
-        sqlite3_str_appendall(s, "COLLATE NOCASE ");
-      } else if(collation == VEC0_COLLATION_RTRIM) {
-        sqlite3_str_appendall(s, "COLLATE RTRIM ");
-      }
-      sqlite3_str_appendall(s, "IN (?");
-      for (int j = 1; j < n; j++) {
-        sqlite3_str_appendall(s, ",?");
-      }
-      sqlite3_str_appendall(s, ") ");
+      sqlite3_free(zList);
       continue;
      }
 #endif
@@ -7183,16 +7227,7 @@ int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value
     int operator = idxStr[idx + 2];
 #if COMPILER_SUPPORTS_VTAB_IN
     if (operator == VEC0_PARTITION_OPERATOR_IN) {
-      sqlite3_value *entry = NULL;
-      for (rc = sqlite3_vtab_in_first(argv[i], &entry); rc == SQLITE_OK && entry;
-           rc = sqlite3_vtab_in_next(argv[i], &entry)) {
-        vec0_chunks_iter_bind_partition_value(p, *outStmt, n++, partition_idx, entry);
-      }
-      if (rc != SQLITE_DONE) {
-        sqlite3_finalize(*outStmt);
-        *outStmt = NULL;
-        return rc;
-      }
+      // the list went into the SQL as literals above
       continue;
     }
 #else
