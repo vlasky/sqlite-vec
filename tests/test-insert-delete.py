@@ -525,14 +525,16 @@ def test_delete_one_chunk_of_two_shrinks_pages(tmp_path):
 
 
 def _shadow_rows(db, table):
-    return {
+    rows = {
         name: db.execute(f'select count(*) from "{name}"').fetchone()[0]
         for (name,) in db.execute(
-            "select name from sqlite_master where name like ? and name != ? order by name",
+            "select name from sqlite_master where name like ? escape '\\' and name != ? order by name",
             [table + "\\_%", table],
         )
         if "_info" not in name
     }
+    assert rows, "no shadow tables found"
+    return rows
 
 
 def test_failed_insert_leaves_no_row(db):

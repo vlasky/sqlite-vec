@@ -30,6 +30,18 @@ INVALID_TYPE_DEFS = [
     "bitcoin[2]",
     "bits[2]",
     "bfloat16[2]",
+    # names the metadata parser would accept: with the brackets they are
+    # vector definitions with an unknown type, and must not become a
+    # metadata column (a table reopened that way would read the wrong
+    # shadow tables)
+    "float64[2]",
+    "double[2]",
+    "f64[2]",
+    "int64[2]",
+    "int[2]",
+    "integer[2]",
+    "text[2]",
+    "boolean[2]",
 ]
 
 
@@ -40,5 +52,8 @@ def test_valid_vector_column_types_accepted(db, type_def):
 
 @pytest.mark.parametrize("type_def", INVALID_TYPE_DEFS)
 def test_malformed_vector_column_types_rejected(db, type_def):
-    with pytest.raises(sqlite3.OperationalError):
+    with pytest.raises(sqlite3.OperationalError, match="could not parse vector column"):
         db.execute(f"create virtual table t using vec0(a {type_def})")
+    # also when another, valid vector column follows
+    with pytest.raises(sqlite3.OperationalError, match="could not parse vector column"):
+        db.execute(f"create virtual table t using vec0(a {type_def}, b float[2])")

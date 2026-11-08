@@ -3057,8 +3057,9 @@ def test_vec_distance_l2_extreme_magnitudes():
     vec_distance_l2 = lambda a, b: db.execute(
         "select vec_distance_l2(?, ?)", [_f32(a), _f32(b)]
     ).fetchone()[0]
-    # 2 elements take the scalar loop, 40 the SIMD kernels with a remainder
-    for pad in [0, 38]:
+    # 2 elements take the scalar loop, 32 the AVX kernel (x86_64) or the NEON
+    # kernel (arm64) exactly, 40 the NEON kernel with a remainder
+    for pad in [0, 30, 38]:
         z = [0] * pad
         for scale in [1e-30, 1e-25, 1e-20, 1e-10, 1.0, 1e10, 1e20, 2e38]:
             assert isclose(vec_distance_l2([scale, 0] + z, [0, 0] + z), scale, rel_tol=1e-6)
@@ -3073,7 +3074,7 @@ def test_vec_distance_l2_extreme_magnitudes():
 
 def test_vec0_l2_extreme_magnitudes():
     # https://github.com/asg017/sqlite-vec/issues/335
-    for dims in [2, 40]:
+    for dims in [2, 32, 40]:
         db.execute(f"create virtual table l2x{dims} using vec0(v float[{dims}])")
         z = [0] * (dims - 2)
         db.execute(f"insert into l2x{dims}(rowid, v) values (1, ?)", [_f32([1e20, 0] + z)])
