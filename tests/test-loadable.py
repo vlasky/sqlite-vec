@@ -3038,6 +3038,11 @@ def test_vec0_update_rowid_refused():
         "update t_rowid set rowid = 9 where rowid = 2",
         "update t_rowid set rowid = 9, a = '[2]' where rowid = 2",
         "update t_rowid set rowid = 'x' where rowid = 2",
+        # _rowid_ names SQLite's own rowid, not the declared column, and must
+        # not pass as unchanged because 2.5 truncates to 2
+        "update t_rowid set _rowid_ = 2.5 where rowid = 2",
+        "update t_rowid set _rowid_ = 'x' where rowid = 2",
+        "update t_rowid set _rowid_ = 9 where rowid = 2",
         "update t_rowid set rowid = 9 where a match '[1]' and k = 1",
         "update t_pk set id = 9 where id = 2",
         "update t_pk set id = 9 where a match '[1]' and k = 1",
@@ -3207,3 +3212,22 @@ def test_vec0_partition_in():
     assert execute_all(db, "select vec0_partition_in('a', 'a') as r") == [{"r": 0}]
     with _raises("wrong number of arguments to function vec0_partition_in()"):
         db.execute("select vec0_partition_in(1)")
+
+
+def test_vec0_update_validates_before_writing():
+    # an UPDATE with a bad vector, auxiliary or metadata value used to write
+    # the columns before it in the argument order and then fail
+    db.execute("create virtual table t_upd using vec0(a float[2], +note text, year integer)")
+    db.execute("insert into t_upd(rowid, a, note, year) values (1, '[1,1]', 'n', 2020)")
+    for sql, message in [
+        ("update t_upd set note = 'x', year = 2021, a = '[1]' where rowid = 1", "Dimension mismatch"),
+        ("update t_upd set note = 'x', year = 2021, a = 'oops' where rowid = 1", "Updated vector for the \"a\" column is invalid"),
+        ("update t_upd set year = 2021, note = 7 where rowid = 1", "Auxiliary column type mismatch"),
+        ("update t_upd set note = 'x', year = 'y' where rowid = 1", "Expected integer for INTEGER metadata column year"),
+    ]:
+        # the auxiliary type mismatch is SQLITE_CONSTRAINT, the others SQLITE_ERROR
+        with pytest.raises(sqlite3.DatabaseError, match=message):
+            db.execute(sql)
+    assert execute_all(db, "select rowid, vec_to_json(a) as a, note, year from t_upd") == [
+        {"rowid": 1, "a": "[1.000000,1.000000]", "note": "n", "year": 2020}
+    ]

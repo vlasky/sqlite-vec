@@ -261,7 +261,9 @@ candidates, and `x IN (SELECT ... COLLATE y)`, which SQLite compares under the
 subquery's collation while `sqlite3_vtab_collation()` reports the left
 operand's, so vec0 compares under the left operand's and drops rows SQLite
 would keep. Name the collation on the left operand instead. vec0 implements
-NOCASE and RTRIM itself, so an application that replaces either built-in
+NOCASE and RTRIM itself (here and in `vec0_partition_in()` for partition key
+`IN (...)` lists; the other partition key operators are SQL and use the
+connection's collations), so an application that replaces either built-in
 collation is not honoured. A constraint's value takes the metadata column's
 affinity, as R-Tree's do; SQLite instead applies numeric affinity when a text
 column is compared with an integer or real column of another table, so a join

@@ -284,8 +284,8 @@ def test_update_without_point_lookup(db):
     reason="partition IN lists need sqlite3_vtab_in(), SQLite 3.38",
 )
 def test_in_list_long(db):
-    # the list goes into the chunks query as literals, so it is not subject
-    # to SQLITE_LIMIT_VARIABLE_NUMBER (32,766 by default)
+    # the list reaches the chunks query as one pointer-bound set, so it is
+    # not subject to SQLITE_LIMIT_VARIABLE_NUMBER (32,766 by default)
     db.execute(
         "create virtual table v using vec0(part integer partition key, s text partition key, a float[1], chunk_size=8)"
     )

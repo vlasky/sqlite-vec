@@ -38,7 +38,7 @@ Run `./scripts/vendor.sh` first to download vendored dependencies (sqlite3.c, sh
 **SIMD control:**
 - SIMD follows the compiler's target, read from its predefined macros with the user's `CFLAGS`/`CPPFLAGS` (so `--target` and `--sysroot` are honoured): `__x86_64__` targets get `SQLITE_VEC_ENABLE_AVX`, `__aarch64__` targets get `SQLITE_VEC_ENABLE_NEON`; Android builds stay scalar
 - The AVX and AVX2 kernels carry per-function target attributes and are used only when the running CPU supports them, so no `-mavx` is passed and one x86_64 binary runs on any x86-64 CPU (the native MSVC build still needs POPCNT for bit vectors, through `__popcnt64`)
-- Set `OMIT_SIMD=1` to disable SIMD optimizations
+- Set `OMIT_SIMD=1` to disable SIMD optimizations. A `CFLAGS=...` given on the `make` command line replaces the Makefile's own additions, these defines included; set `CFLAGS` in the environment, or pass the define yourself
 
 ### Testing
 

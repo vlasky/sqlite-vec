@@ -122,8 +122,9 @@ than `k` of them; raise `k` to get more. Two cases are not recovered by a larger
 `k`: a replacement `like()` or `glob()` that accepts more than the built-in
 matching, and an `IN (SELECT ... COLLATE x)` list, which vec0 compares under the
 column's collation rather than the subquery's; put the `COLLATE` on the column
-instead. vec0 implements `NOCASE` and `RTRIM` itself, so replacing either
-built-in collation is not honoured, and a constraint's value takes the
+instead. vec0 implements `NOCASE` and `RTRIM` itself, for metadata filters and
+for `IN (...)` lists on text partition keys, so replacing either built-in
+collation is not honoured there, and a constraint's value takes the
 column's affinity, so a join condition comparing a text column with an integer
 column of another table can differ from SQLite's own comparison.
 

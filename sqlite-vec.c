@@ -7212,10 +7212,19 @@ static int vec0_partition_in_new(sqlite3_value *list, int column_type,
       vec0_partition_in_free(in);
       return SQLITE_NOMEM;
     }
+    in->values[in->n++] = copy;
     if (column_type != SQLITE_TEXT) {
       sqlite3_value_numeric_type(copy);
+    } else {
+      // Make the UTF-8 text now: the copy has no connection, so a failed
+      // conversion later would read as "no match" instead of an error.
+      int type = sqlite3_value_type(copy);
+      if ((type == SQLITE_TEXT || type == SQLITE_INTEGER || type == SQLITE_FLOAT) &&
+          !sqlite3_value_text(copy)) {
+        vec0_partition_in_free(in);
+        return SQLITE_NOMEM;
+      }
     }
-    in->values[in->n++] = copy;
   }
   if (rc != SQLITE_DONE) {
     vec0_partition_in_free(in);
@@ -7255,6 +7264,10 @@ static void vec0_partition_in_func(sqlite3_context *context, int argc,
     if (sqlite3_value_type(stored) == SQLITE_TEXT) {
       const char *a = (const char *)sqlite3_value_text(stored);
       int na = sqlite3_value_bytes(stored);
+      if (!a) {
+        sqlite3_result_error_nomem(context);
+        return;
+      }
       for (int i = 0; i < in->n && !match; i++) {
         int type = sqlite3_value_type(in->values[i]);
         if (type != SQLITE_TEXT && type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
@@ -11314,12 +11327,14 @@ int vec0Update_UpdateAuxColumn(vec0_vtab *p, int auxiliary_column_idx, sqlite3_v
   return SQLITE_OK;
 }
 
-int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
-                                  int i, sqlite3_value *valueVector) {
+// Parses and checks a vector column's new value for an UPDATE: type,
+// dimensions and, for cosine columns, that it is not zero. On success the
+// caller owns *outVector and releases it with (*outCleanup)(*outVector).
+int vec0Update_ParseVectorColumn(vec0_vtab *p, int i, sqlite3_value *valueVector,
+                                 void **outVector, size_t *outDimensions,
+                                 enum VectorElementType *outElementType,
+                                 vector_cleanup *outCleanup) {
   int rc;
-
-  sqlite3_blob *blobVectors = NULL;
-
   char *pzError;
   size_t dimensions;
   enum VectorElementType elementType;
@@ -11333,8 +11348,7 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
     vtab_set_error(
         &p->base, "Updated vector for the \"%.*s\" column is invalid: %z",
         p->vector_columns[i].name_length, p->vector_columns[i].name, pzError);
-    rc = SQLITE_ERROR;
-    goto cleanup;
+    return SQLITE_ERROR;
   }
   if (elementType != p->vector_columns[i].element_type) {
     // IMP: V03643_20481
@@ -11345,8 +11359,8 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
         p->vector_columns[i].name_length, p->vector_columns[i].name,
         vector_subtype_name(p->vector_columns[i].element_type),
         vector_subtype_name(elementType));
-    rc = SQLITE_ERROR;
-    goto cleanup;
+    cleanup(vector);
+    return SQLITE_ERROR;
   }
   if (dimensions != p->vector_columns[i].dimensions) {
     // IMP: V25739_09810
@@ -11356,8 +11370,8 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
         "Expected %d dimensions but received %d.",
         p->vector_columns[i].name_length, p->vector_columns[i].name,
         p->vector_columns[i].dimensions, dimensions);
-    rc = SQLITE_ERROR;
-    goto cleanup;
+    cleanup(vector);
+    return SQLITE_ERROR;
   }
 
   if (p->vector_columns[i].distance_metric == VEC0_DISTANCE_METRIC_COSINE &&
@@ -11368,7 +11382,30 @@ int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
         "which is not allowed when distance_metric=cosine, as cosine "
         "distance is undefined for zero vectors.",
         p->vector_columns[i].name_length, p->vector_columns[i].name);
-    rc = SQLITE_ERROR;
+    cleanup(vector);
+    return SQLITE_ERROR;
+  }
+
+  *outVector = vector;
+  *outDimensions = dimensions;
+  *outElementType = elementType;
+  *outCleanup = cleanup;
+  return SQLITE_OK;
+}
+
+int vec0Update_UpdateVectorColumn(vec0_vtab *p, i64 chunk_id, i64 chunk_offset,
+                                  int i, sqlite3_value *valueVector) {
+  int rc;
+
+  sqlite3_blob *blobVectors = NULL;
+
+  size_t dimensions;
+  enum VectorElementType elementType;
+  void *vector;
+  vector_cleanup cleanup = vector_cleanup_noop;
+  rc = vec0Update_ParseVectorColumn(p, i, valueVector, &vector, &dimensions,
+                                    &elementType, &cleanup);
+  if (rc != SQLITE_OK) {
     goto cleanup;
   }
 
@@ -11457,7 +11494,8 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
     // Moving a row to another rowid is not implemented, and it used to be
     // silently ignored while reporting success.
     sqlite3_value *newId = argv[2 + VEC0_COLUMN_ID];
-    if (sqlite3_value_int64(argv[1]) != rowid ||
+    if (sqlite3_value_type(argv[1]) != SQLITE_INTEGER ||
+        sqlite3_value_int64(argv[1]) != rowid ||
         (!sqlite3_value_nochange(newId) &&
          (sqlite3_value_type(newId) != SQLITE_INTEGER ||
           sqlite3_value_int64(newId) != rowid))) {
@@ -11488,6 +11526,48 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
     if(rc != SQLITE_OK) {
       return rc;
     }
+  }
+  for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
+    if(p->user_column_kinds[i] != SQLITE_VEC0_USER_COLUMN_KIND_AUXILIARY) {
+      continue;
+    }
+    sqlite3_value * value = argv[2+VEC0_COLUMN_USERN_START + i];
+    if(sqlite3_value_nochange(value)) {
+      continue;
+    }
+    int auxiliary_idx = p->user_column_idxs[i];
+    int v_type = sqlite3_value_type(value);
+    if (v_type != SQLITE_NULL && v_type != p->auxiliary_columns[auxiliary_idx].type) {
+      vtab_set_error(
+        pVTab,
+        "Auxiliary column type mismatch: The auxiliary column %.*s has type %s, but %s was provided.",
+        p->auxiliary_columns[auxiliary_idx].name_length,
+        p->auxiliary_columns[auxiliary_idx].name,
+        type_name(p->auxiliary_columns[auxiliary_idx].type),
+        type_name(v_type)
+      );
+      return SQLITE_CONSTRAINT;
+    }
+  }
+  for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
+    if(p->user_column_kinds[i] != SQLITE_VEC0_USER_COLUMN_KIND_VECTOR) {
+      continue;
+    }
+    sqlite3_value *valueVector = argv[2 + VEC0_COLUMN_USERN_START + i];
+    // NULL means unchanged here, see step 5
+    if (sqlite3_value_type(valueVector) == SQLITE_NULL) {
+      continue;
+    }
+    void *vector;
+    size_t dimensions;
+    enum VectorElementType elementType;
+    vector_cleanup cleanup = vector_cleanup_noop;
+    rc = vec0Update_ParseVectorColumn(p, p->user_column_idxs[i], valueVector, &vector,
+                                      &dimensions, &elementType, &cleanup);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    cleanup(vector);
   }
 
   // 2) update any partition key values
