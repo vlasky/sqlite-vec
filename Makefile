@@ -64,20 +64,22 @@ ifndef OMIT_SIMD
 	# ARM, and cross-compiles (Android, cosmocc) target something else again.
 	# Android builds stay scalar.
 	ifeq ($(findstring android,$(CC)),)
-	TARGET_MACHINE=$(shell $(CC) -dumpmachine 2>/dev/null)
+	# The compiler's predefined macros, with the user's flags, so that
+	# --target, --sysroot or -m32 in CFLAGS/CPPFLAGS are honoured.
+	TARGET_MACROS=$(shell echo | $(CC) $(EXT_CFLAGS) -dM -E - 2>/dev/null)
 	# The AVX kernels are compiled with per-function target attributes and
 	# used only when the running CPU supports them, so no -mavx: the same
 	# binary runs on any x86-64 CPU.
-	ifneq ($(filter x86_64-% amd64-%,$(TARGET_MACHINE)),)
+	ifneq ($(filter __x86_64__ __amd64__,$(TARGET_MACROS)),)
 	CFLAGS += -DSQLITE_VEC_ENABLE_AVX
 	endif
 	# NEON is in the arm64 baseline (GCC and Clang define __ARM_NEON for
 	# aarch64 with no -m flag), so it needs only the define.
-	ifneq ($(filter aarch64-% arm64-%,$(TARGET_MACHINE)),)
+	ifneq ($(filter __aarch64__,$(TARGET_MACROS)),)
 	CFLAGS += -DSQLITE_VEC_ENABLE_NEON
-	endif
-	ifneq ($(filter arm64-apple-%,$(TARGET_MACHINE)),)
+	ifneq ($(filter __APPLE__,$(TARGET_MACROS)),)
 	CFLAGS += -mcpu=apple-m1
+	endif
 	endif
 	endif
 endif
@@ -192,11 +194,12 @@ sqlite-vec.h: sqlite-vec.h.tmpl VERSION
 	VERSION_MAJOR=$(VERSION_MAJOR) \
 	VERSION_MINOR=$(VERSION_MINOR) \
 	VERSION_PATCH=$(VERSION_PATCH) \
-	envsubst < $< > $@
-	grep -Eq '^#define SQLITE_VEC_VERSION "[^"]+"' $@
-	grep -Eq '^#define SQLITE_VEC_VERSION_MAJOR [0-9]+' $@
-	grep -Eq '^#define SQLITE_VEC_VERSION_MINOR [0-9]+' $@
-	grep -Eq '^#define SQLITE_VEC_VERSION_PATCH [0-9]+' $@
+	envsubst < $< > $@.tmp
+	grep -Eq '^#define SQLITE_VEC_VERSION "[^"]+"' $@.tmp
+	grep -Eq '^#define SQLITE_VEC_VERSION_MAJOR [0-9]+' $@.tmp
+	grep -Eq '^#define SQLITE_VEC_VERSION_MINOR [0-9]+' $@.tmp
+	grep -Eq '^#define SQLITE_VEC_VERSION_PATCH [0-9]+' $@.tmp
+	mv $@.tmp $@
 
 clean:
 	rm -rf dist

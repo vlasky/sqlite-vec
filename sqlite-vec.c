@@ -171,14 +171,26 @@ enum VectorElementType {
 #ifdef SQLITE_VEC_ENABLE_AVX
 #include <immintrin.h>
 #if defined(_MSC_VER) && !defined(__clang__)
-#include <intrin.h>
 #define PORTABLE_ALIGN32 __declspec(align(32))
 #define PORTABLE_ALIGN64 __declspec(align(64))
 // Native MSVC compiles AVX intrinsics in any function whatever /arch says,
-// so the kernels need no attribute, and it has no __builtin_cpu_supports().
-// (clang-cl defines _MSC_VER too but takes the GCC/Clang branch below.)
+// so the kernels need no attribute.
 #define VEC_TARGET_AVX
 #define VEC_TARGET_AVX2
+#else
+#define PORTABLE_ALIGN32 __attribute__((aligned(32)))
+#define PORTABLE_ALIGN64 __attribute__((aligned(64)))
+// Only the kernels are compiled for AVX, through their target attribute, and
+// they run only when the CPU supports them, so the file needs no -mavx and
+// the same binary runs on any x86-64 CPU.
+#define VEC_TARGET_AVX __attribute__((target("avx")))
+#define VEC_TARGET_AVX2 __attribute__((target("avx2")))
+#endif
+#ifdef _MSC_VER
+#include <intrin.h>
+// Windows, native MSVC or clang-cl: ask cpuid. clang-cl has
+// __builtin_cpu_supports() but it reads a table from compiler-rt, which a
+// link.exe link (the Rust binding, say) does not provide.
 static int vec_cpu_supports_avx(int avx2) {
   int info[4];
   __cpuid(info, 0);
@@ -204,9 +216,10 @@ static int vec_cpu_supports_avx(int avx2) {
   __cpuidex(info, 7, 0);
   return (info[1] >> 5) & 1;
 }
-// cpuid is slow, so the answer is cached once per feature. The cache is a
-// LONG written with an interlocked exchange: several threads may run the
-// first distance calls at once on different connections.
+// cpuid is slow, so the answer is cached once per feature. Several threads
+// may run the first distance calls at once on different connections, so the
+// cache is written with an interlocked exchange; the read relies on Windows'
+// guarantee that an aligned 32-bit volatile access is atomic.
 static int vec_cpu_feature_cached(volatile long *cache, int avx2) {
   long value = *cache;
   if (value < 0) {
@@ -220,14 +233,8 @@ static volatile long vec_cpu_has_avx2 = -1;
 #define VEC_CPU_SUPPORTS_AVX() vec_cpu_feature_cached(&vec_cpu_has_avx, 0)
 #define VEC_CPU_SUPPORTS_AVX2() vec_cpu_feature_cached(&vec_cpu_has_avx2, 1)
 #else
-#define PORTABLE_ALIGN32 __attribute__((aligned(32)))
-#define PORTABLE_ALIGN64 __attribute__((aligned(64)))
-// Only the kernels are compiled for AVX, through their target attribute, and
-// they run only when the CPU supports them, so the file needs no -mavx and
-// the same binary runs on any x86-64 CPU. __builtin_cpu_supports() reads a
-// table the runtime fills in before main(), so it needs no cache here.
-#define VEC_TARGET_AVX __attribute__((target("avx")))
-#define VEC_TARGET_AVX2 __attribute__((target("avx2")))
+// __builtin_cpu_supports() reads a table the runtime fills in before main(),
+// so it needs no cache here.
 #define VEC_CPU_SUPPORTS_AVX() __builtin_cpu_supports("avx")
 #define VEC_CPU_SUPPORTS_AVX2() __builtin_cpu_supports("avx2")
 #endif
@@ -590,7 +597,7 @@ static f32 cosine_int8_neon(const void *pA, const void *pB, const void *pD) {
   int64x2_t aMag_acc = vdupq_n_s64(0);
   int64x2_t bMag_acc = vdupq_n_s64(0);
 
-  while (a < aEnd - 31) {
+  while (aEnd - a > 31) {
     int32x4_t dot_acc1 = vdupq_n_s32(0);
     int32x4_t dot_acc2 = vdupq_n_s32(0);
     int32x4_t aMag_acc1 = vdupq_n_s32(0);
@@ -656,7 +663,7 @@ static f32 cosine_int8_neon(const void *pA, const void *pB, const void *pD) {
     b += 32;
   }
 
-  while (a < aEnd - 15) {
+  while (aEnd - a > 15) {
     int32x4_t dot_acc1 = vdupq_n_s32(0);
     int32x4_t aMag_acc1 = vdupq_n_s32(0);
     int32x4_t bMag_acc1 = vdupq_n_s32(0);
