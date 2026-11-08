@@ -207,9 +207,15 @@ is encoded with `'A' + partition_idx` and can be decoded with `c - 'A'`.
 
 The third character of the block denotes which operator is used in the
 constraint. It will be one of the values of `enum vec0_partition_operator`, as
-only a subset of operations are supported on partition keys.
+only a subset of operations are supported on partition keys. For
+`VEC0_PARTITION_OPERATOR_IN` (`'g'`, a `part in (...)` constraint), `argv[i]`
+is the list to walk with `sqlite3_vtab_in_first()` / `sqlite3_vtab_in_next()`,
+and the chunks query gets one `IN (?, ?, ...)` placeholder per value, so the
+whole list is handled in one xFilter call. SQLite 3.38 or later is required
+for that; older versions get one `=` xFilter call per value.
 
-The fourth character of the block is a `_` filler.
+The fourth character of the block is the collation of a text partition key
+constraint (`vec0_collation`), or a `_` filler.
 
 #### `VEC0_IDXSTR_KIND_POINT_ID` (`'!'`)
 

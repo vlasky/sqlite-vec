@@ -3022,3 +3022,134 @@ def test_coverage():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_vec0_update_rowid_refused():
+    # vec0 declares a visible "rowid" (or integer primary key) column, so
+    # `set rowid = 9` reaches xUpdate as that column's new value. Moving a row
+    # is not implemented; it used to be ignored while reporting one changed row.
+    # https://github.com/asg017/sqlite-vec/issues/332
+    db.execute("create virtual table t_rowid using vec0(a float[1])")
+    db.execute("insert into t_rowid(rowid, a) values (2, '[1]')")
+    db.execute("create virtual table t_pk using vec0(id integer primary key, a float[1])")
+    db.execute("insert into t_pk(id, a) values (2, '[1]')")
+    for sql in [
+        "update t_rowid set rowid = 9 where rowid = 2",
+        "update t_rowid set rowid = 9, a = '[2]' where rowid = 2",
+        "update t_rowid set rowid = 'x' where rowid = 2",
+        "update t_rowid set rowid = 9 where a match '[1]' and k = 1",
+        "update t_pk set id = 9 where id = 2",
+        "update t_pk set id = 9 where a match '[1]' and k = 1",
+    ]:
+        with _raises("UPDATEs on vec0 primary key values are not allowed."):
+            db.execute(sql)
+    # the same value is not a change
+    db.execute("update t_rowid set rowid = 2, a = '[3]' where rowid = 2")
+    db.execute("update t_pk set id = 2, a = '[3]' where id = 2")
+    assert execute_all(db, "select rowid, vec_to_json(a) as a from t_rowid") == [{"rowid": 2, "a": "[3.000000]"}]
+    assert execute_all(db, "select id, vec_to_json(a) as a from t_pk") == [{"id": 2, "a": "[3.000000]"}]
+
+
+def test_vec_distance_l2_extreme_magnitudes():
+    # the f32 sum of squared differences overflowed to Inf above about 1.8e19
+    # and underflowed to 0 below about 1e-19; those sums are now redone in
+    # double. https://github.com/asg017/sqlite-vec/issues/334
+    vec_distance_l2 = lambda a, b: db.execute(
+        "select vec_distance_l2(?, ?)", [_f32(a), _f32(b)]
+    ).fetchone()[0]
+    # 2 elements take the scalar loop, 40 the SIMD kernels with a remainder
+    for pad in [0, 38]:
+        z = [0] * pad
+        for scale in [1e-30, 1e-25, 1e-20, 1e-10, 1.0, 1e10, 1e20, 2e38]:
+            assert isclose(vec_distance_l2([scale, 0] + z, [0, 0] + z), scale, rel_tol=1e-6)
+            assert isclose(vec_distance_l2([0, 0] + z, [0, -scale] + z), scale, rel_tol=1e-6)
+            assert isclose(vec_distance_l2([scale, scale] + z, [0, 0] + z), scale * np.sqrt(2), rel_tol=1e-6)
+            assert vec_distance_l2([scale, 0] + z, [scale, 0] + z) == 0.0
+        # a tiny difference next to an ordinary one is still an ordinary distance
+        assert isclose(vec_distance_l2([1e-25, 3] + z, [0, 0] + z), 3.0, rel_tol=1e-6)
+    # a distance that really does not fit in float32 stays Inf
+    assert vec_distance_l2([3e38, 0], [-3e38, 0]) == float("inf")
+
+
+def test_vec0_l2_extreme_magnitudes():
+    # https://github.com/asg017/sqlite-vec/issues/335
+    for dims in [2, 40]:
+        db.execute(f"create virtual table l2x{dims} using vec0(v float[{dims}])")
+        z = [0] * (dims - 2)
+        db.execute(f"insert into l2x{dims}(rowid, v) values (1, ?)", [_f32([1e20, 0] + z)])
+        db.execute(f"insert into l2x{dims}(rowid, v) values (2, ?)", [_f32([1e-25, 0] + z)])
+        db.execute(f"insert into l2x{dims}(rowid, v) values (3, ?)", [_f32([3, 0] + z)])
+        rows = db.execute(
+            f"select rowid, distance from l2x{dims} where v match ? and k = 3",
+            [_f32([0, 0] + z)],
+        ).fetchall()
+        assert [r[0] for r in rows] == [2, 3, 1]
+        assert isclose(rows[0][1], 1e-25, rel_tol=1e-6)
+        assert rows[1][1] == 3.0
+        assert isclose(rows[2][1], 1e20, rel_tol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "vector, transform, expected",
+    [
+        (b"\x01\x80", "vec_bit(?)", [1] + [0] * 14 + [1]),
+        (
+            "[1,-1,0,2,-2,0,3,-3]",
+            "vec_quantize_binary(?)",
+            [1, 0, 0, 1, 0, 0, 1, 0],
+        ),
+    ],
+)
+def test_vec_each_bit(vector, transform, expected):
+    # vec_each read bits most significant first, while vec_to_json(),
+    # vec_quantize_binary() and the bitmaps themselves are least significant
+    # first. Ported from upstream PR asg017/sqlite-vec#323.
+    assert execute_all(
+        db, f"select rowid, value from vec_each({transform})", [vector]
+    ) == [{"rowid": i, "value": value} for i, value in enumerate(expected)]
+    assert execute_all(db, f"select vec_to_json({transform}) as j", [vector]) == [
+        {"j": "[" + ",".join(str(v) for v in expected) + "]"}
+    ]
+
+
+@pytest.mark.parametrize(
+    "dimensions", [(2**31 - 1) // 255, (2**31 - 1) // 255 + 1, 8_500_001]
+)
+def test_vec_distance_l1_int8_large(dimensions):
+    # the int8 L1 distance summed in 32 bits and wrapped negative from
+    # 8,421,505 elements at opposite extremes. Ported from upstream PR
+    # asg017/sqlite-vec#365.
+    a = bytes([127]) * dimensions
+    b = bytes([128]) * dimensions
+    distance, reverse, identical = db.execute(
+        "select vec_distance_l1(vec_int8(?), vec_int8(?)), "
+        "vec_distance_l1(vec_int8(?), vec_int8(?)), "
+        "vec_distance_l1(vec_int8(?), vec_int8(?))",
+        (a, b, b, a, a, a),
+    ).fetchone()
+    assert type(distance) is int
+    assert distance == dimensions * 255
+    assert reverse == distance
+    assert identical == 0
+
+
+def test_vec0_write_through_knn_plan():
+    # xRowid refused KNN plans, so an UPDATE or DELETE whose WHERE clause was
+    # a KNN query failed with "expected point query plan in vec0Rowid" on
+    # tables without a declared primary key column.
+    db.execute("create virtual table t_knn_write using vec0(a float[1], n integer)")
+    db.executemany(
+        "insert into t_knn_write(rowid, a, n) values (?, ?, 0)",
+        [(1, "[1]"), (2, "[2]"), (3, "[3]")],
+    )
+    db.execute("update t_knn_write set n = 1 where a match '[0]' and k = 2")
+    assert execute_all(db, "select rowid, n from t_knn_write") == [
+        {"rowid": 1, "n": 1},
+        {"rowid": 2, "n": 1},
+        {"rowid": 3, "n": 0},
+    ]
+    db.execute("delete from t_knn_write where a match '[0]' and k = 1")
+    assert execute_all(db, "select rowid, n from t_knn_write") == [
+        {"rowid": 2, "n": 1},
+        {"rowid": 3, "n": 0},
+    ]

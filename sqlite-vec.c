@@ -203,8 +203,8 @@ static f32 l2_sqr_float_avx(const void *pVect1v, const void *pVect2v,
   }
 
   _mm256_store_ps(TmpRes, sum);
-  return sqrt(TmpRes[0] + TmpRes[1] + TmpRes[2] + TmpRes[3] + TmpRes[4] +
-              TmpRes[5] + TmpRes[6] + TmpRes[7]);
+  return TmpRes[0] + TmpRes[1] + TmpRes[2] + TmpRes[3] + TmpRes[4] +
+         TmpRes[5] + TmpRes[6] + TmpRes[7];
 }
 #endif
 
@@ -269,7 +269,7 @@ static f32 l2_sqr_float_neon(const void *pVect1v, const void *pVect2v,
     pVect2++;
   }
 
-  return sqrt(sum_scalar);
+  return sum_scalar;
 }
 
 static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
@@ -658,7 +658,7 @@ static f32 l2_sqr_float(const void *pVect1v, const void *pVect2v,
     pVect2++;
     res += t * t;
   }
-  return sqrt(res);
+  return res;
 }
 
 static f32 l2_sqr_int8(const void *pA, const void *pB, const void *pD) {
@@ -676,18 +676,46 @@ static f32 l2_sqr_int8(const void *pA, const void *pB, const void *pD) {
   return sqrt(res);
 }
 
-static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
-#ifdef SQLITE_VEC_ENABLE_NEON
-  if ((*(const size_t *)d) > 16) {
-    return l2_sqr_float_neon(a, b, d);
+// Sums the squared differences in double, for the rare inputs where the f32
+// kernels overflow or lose precision. The square of any f32 difference is
+// representable in double.
+static double l2_sqr_float_double(const f32 *a, const f32 *b, size_t qty) {
+  double res = 0;
+  for (size_t i = 0; i < qty; i++) {
+    double t = (double)a[i] - (double)b[i];
+    res += t * t;
   }
+  return res;
+}
+
+// The f32 kernels above return the sum of squared differences, not its square
+// root, so that this function can see when the f32 sum went wrong.
+static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
+  size_t qty = *(const size_t *)d;
+  f32 sum;
+#ifdef SQLITE_VEC_ENABLE_NEON
+  if (qty > 16) {
+    sum = l2_sqr_float_neon(a, b, d);
+  } else
 #endif
 #ifdef SQLITE_VEC_ENABLE_AVX
-  if (((*(const size_t *)d) % 16 == 0)) {
-    return l2_sqr_float_avx(a, b, d);
-  }
+  if (qty % 16 == 0) {
+    sum = l2_sqr_float_avx(a, b, d);
+  } else
 #endif
-  return l2_sqr_float(a, b, d);
+  {
+    sum = l2_sqr_float(a, b, d);
+  }
+  // Squaring a difference above about 1.8e19 overflows the f32 sum to Inf, and
+  // squaring one below about 1e-19 gives a subnormal with few significant
+  // bits. Subnormal terms only matter when the whole sum is below
+  // 2^24 * FLT_MIN, so sums under that bound, and Inf, are redone in double.
+  // Ordinary vectors never take this path; identical ones (sum == 0) do,
+  // harmlessly. Reported upstream as asg017/sqlite-vec#334 and #335.
+  if (!(sum >= 16777216.0f * FLT_MIN) || sum == INFINITY) {
+    return sqrt(l2_sqr_float_double((const f32 *)a, (const f32 *)b, qty));
+  }
+  return sqrt(sum);
 }
 
 static f32 distance_l2_sqr_int8(const void *a, const void *b, const void *d) {
@@ -6097,6 +6125,10 @@ typedef enum  {
   
   // "Not equal to" constraint on a PARTITON KEY column, ex `year != 2024`
   VEC0_PARTITION_OPERATOR_NE = 'f',
+
+  // "In list" constraint on a PARTITON KEY column, ex `year in (2023, 2024)`.
+  // argv[i] is the sqlite3_vtab_in_first()/sqlite3_vtab_in_next() list.
+  VEC0_PARTITION_OPERATOR_IN = 'g',
 } vec0_partition_operator;
 typedef enum  {
   VEC0_METADATA_OPERATOR_EQ = 'a',
@@ -6434,6 +6466,16 @@ static int vec0BestIndex(sqlite3_vtab *pVTab, sqlite3_index_info *pIdxInfo) {
       switch(op) {
         case SQLITE_INDEX_CONSTRAINT_EQ: {
           value = VEC0_PARTITION_OPERATOR_EQ;
+#if COMPILER_SUPPORTS_VTAB_IN
+          // `part in (1, 2)`: take the whole list in one xFilter call, so the
+          // query returns the k nearest across the listed partitions. Left to
+          // SQLite, xFilter would run once per value and return k rows each.
+          if (sqlite3_libversion_number() >= 3038000 &&
+              sqlite3_vtab_in(pIdxInfo, i, -1)) {
+            value = VEC0_PARTITION_OPERATOR_IN;
+            sqlite3_vtab_in(pIdxInfo, i, 1);
+          }
+#endif
           break;
         }
         case SQLITE_INDEX_CONSTRAINT_GT: {
@@ -7001,6 +7043,23 @@ int vec0_get_metadata_text_long_value(
  * @param outStmt - output sqlite3_stmt of chunks with all filters applied
  * @return int SQLITE_OK on success, error code otherwise
  */
+// Binds one partition key constraint value to the chunks statement with the
+// affinity of its partition column, as SQLite would apply it.
+static void vec0_chunks_iter_bind_partition_value(vec0_vtab *p, sqlite3_stmt *stmt, int n,
+                                                  int partition_idx, sqlite3_value *value) {
+  int type = sqlite3_value_type(value);
+  if(p->paritition_columns[partition_idx].type == SQLITE_TEXT &&
+     (type == SQLITE_INTEGER || type == SQLITE_FLOAT)) {
+    sqlite3_bind_text(stmt, n, (const char *) sqlite3_value_text(value),
+                      sqlite3_value_bytes(value), SQLITE_TRANSIENT);
+    return;
+  }
+  if(p->paritition_columns[partition_idx].type != SQLITE_TEXT) {
+    sqlite3_value_numeric_type(value);
+  }
+  sqlite3_bind_value(stmt, n, value);
+}
+
 int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value ** argv, sqlite3_stmt** outStmt) {
   // always null terminated, enforced by SQLite
   int idxStrLength = strlen(idxStr);
@@ -7051,6 +7110,40 @@ int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value
      case VEC0_PARTITION_OPERATOR_NE:
       sqlite3_str_appendf(s, " partition%02d != ? ", partition_idx);
       break;
+#if COMPILER_SUPPORTS_VTAB_IN
+     case VEC0_PARTITION_OPERATOR_IN: {
+      // One placeholder per list value. The collation goes on the column,
+      // where it applies to each comparison, not after the list.
+      sqlite3_value *entry = NULL;
+      int n = 0;
+      for (rc = sqlite3_vtab_in_first(argv[i], &entry); rc == SQLITE_OK && entry;
+           rc = sqlite3_vtab_in_next(argv[i], &entry)) {
+        n++;
+      }
+      if (rc != SQLITE_DONE) {
+        char * zSql = sqlite3_str_finish(s);
+        sqlite3_free(zSql);
+        return rc;
+      }
+      if (n == 0) {
+        // `in ()` matches nothing
+        sqlite3_str_appendall(s, " 0 ");
+        continue;
+      }
+      sqlite3_str_appendf(s, " partition%02d ", partition_idx);
+      if(collation == VEC0_COLLATION_NOCASE) {
+        sqlite3_str_appendall(s, "COLLATE NOCASE ");
+      } else if(collation == VEC0_COLLATION_RTRIM) {
+        sqlite3_str_appendall(s, "COLLATE RTRIM ");
+      }
+      sqlite3_str_appendall(s, "IN (?");
+      for (int j = 1; j < n; j++) {
+        sqlite3_str_appendall(s, ",?");
+      }
+      sqlite3_str_appendall(s, ") ");
+      continue;
+     }
+#endif
      default: {
       char * zSql = sqlite3_str_finish(s);
       sqlite3_free(zSql);
@@ -7087,20 +7180,28 @@ int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value
       continue;
     }
     int partition_idx = idxStr[idx + 1] - 'A';
-    int type = sqlite3_value_type(argv[i]);
-    if(p->paritition_columns[partition_idx].type == SQLITE_TEXT &&
-       (type == SQLITE_INTEGER || type == SQLITE_FLOAT)) {
-      sqlite3_bind_text(*outStmt, n++, (const char *) sqlite3_value_text(argv[i]),
-                        sqlite3_value_bytes(argv[i]), SQLITE_TRANSIENT);
+    int operator = idxStr[idx + 2];
+#if COMPILER_SUPPORTS_VTAB_IN
+    if (operator == VEC0_PARTITION_OPERATOR_IN) {
+      sqlite3_value *entry = NULL;
+      for (rc = sqlite3_vtab_in_first(argv[i], &entry); rc == SQLITE_OK && entry;
+           rc = sqlite3_vtab_in_next(argv[i], &entry)) {
+        vec0_chunks_iter_bind_partition_value(p, *outStmt, n++, partition_idx, entry);
+      }
+      if (rc != SQLITE_DONE) {
+        sqlite3_finalize(*outStmt);
+        *outStmt = NULL;
+        return rc;
+      }
       continue;
     }
-    if(p->paritition_columns[partition_idx].type != SQLITE_TEXT) {
-      sqlite3_value_numeric_type(argv[i]);
-    }
-    sqlite3_bind_value(*outStmt, n++, argv[i]);
+#else
+    UNUSED_PARAMETER(operator);
+#endif
+    vec0_chunks_iter_bind_partition_value(p, *outStmt, n++, partition_idx, argv[i]);
   }
 
-  return rc;
+  return SQLITE_OK;
 }
 
 // a single `xxx in (...)` constraint on a metadata column. TEXT or INTEGER only for now.
@@ -9129,11 +9230,15 @@ static int vec0Rowid(sqlite3_vtab_cursor *cur, sqlite_int64 *pRowid) {
     return SQLITE_OK;
   }
   case VEC0_QUERY_PLAN_KNN: {
-    vtab_set_error(cur->pVtab,
-                   "Internal sqlite-vec error: expected point query plan in "
-                   "vec0Rowid, found %d",
-                   pCur->query_plan);
-    return SQLITE_ERROR;
+    // SQLite asks for the rowid when a KNN query drives an UPDATE or DELETE,
+    // which used to fail here as an internal error.
+    if (!pCur->knn_data) {
+      vtab_set_error(cur->pVtab,
+                     "Internal sqlite-vec error: knn_data is NULL in vec0Rowid.");
+      return SQLITE_ERROR;
+    }
+    *pRowid = pCur->knn_data->rowids[pCur->knn_data->current_idx];
+    return SQLITE_OK;
   }
   }
   return SQLITE_ERROR;
@@ -9307,6 +9412,10 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
     return vec0_result_id(pVtab, context, rowid);
   }
   else if (vec0_column_idx_is_vector(pVtab, i)) {
+    if (sqlite3_vtab_nochange(context)) {
+      sqlite3_result_null(context);
+      return SQLITE_OK;
+    }
     void *v;
     int sz;
     int vector_idx = vec0_column_idx_to_vector_idx(pVtab, i);
@@ -9324,6 +9433,11 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
     sqlite3_result_null(context);
   }
   else if(vec0_column_idx_is_partition(pVtab, i)) {
+    // An UPDATE that leaves this column alone must not see a value here,
+    // otherwise xUpdate takes the unchanged value for a new one and refuses it.
+    if(sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int partition_idx = vec0_column_idx_to_partition_idx(pVtab, i);
     sqlite3_value * v;
     int rc = vec0_get_partition_value_for_rowid(pVtab, rowid, partition_idx, &v);
@@ -9335,6 +9449,9 @@ static int vec0Column_fullscan(vec0_vtab *pVtab, vec0_cursor *pCur,
     }
   }
   else if(vec0_column_idx_is_auxiliary(pVtab, i)) {
+    if(sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int auxiliary_idx = vec0_column_idx_to_auxiliary_idx(pVtab, i);
     sqlite3_value * v;
     int rc = vec0_get_auxiliary_value_for_rowid(pVtab, rowid, auxiliary_idx, &v);
@@ -9472,6 +9589,10 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
     return SQLITE_OK;
   }
   else if (vec0_column_idx_is_vector(pVtab, i)) {
+    if (sqlite3_vtab_nochange(context)) {
+      sqlite3_result_null(context);
+      return SQLITE_OK;
+    }
     void *out;
     int sz;
     int vector_idx = vec0_column_idx_to_vector_idx(pVtab, i);
@@ -9487,6 +9608,9 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
     return SQLITE_OK;
   }
   else if(vec0_column_idx_is_partition(pVtab, i)) {
+    if(sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int partition_idx = vec0_column_idx_to_partition_idx(pVtab, i);
     i64 rowid = pCur->knn_data->rowids[pCur->knn_data->current_idx];
     sqlite3_value * v;
@@ -9499,6 +9623,9 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
     }
   }
   else if(vec0_column_idx_is_auxiliary(pVtab, i)) {
+    if(sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int auxiliary_idx = vec0_column_idx_to_auxiliary_idx(pVtab, i);
     i64 rowid = pCur->knn_data->rowids[pCur->knn_data->current_idx];
     sqlite3_value * v;
@@ -9512,6 +9639,9 @@ static int vec0Column_knn(vec0_vtab *pVtab, vec0_cursor *pCur,
   }
 
   else if(vec0_column_idx_is_metadata(pVtab, i)) {
+    if(sqlite3_vtab_nochange(context)) {
+      return SQLITE_OK;
+    }
     int metadata_idx = vec0_column_idx_to_metadata_idx(pVtab, i);
     i64 rowid = pCur->knn_data->rowids[pCur->knn_data->current_idx];
     int rc = vec0_result_metadata_value_for_rowid(pVtab, rowid, metadata_idx, context);
@@ -9946,47 +10076,53 @@ cleanup:
   return rc;
 }
 
-int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid, i64 chunk_id, i64 chunk_offset, sqlite3_value * v, int isupdate) {
-  int rc;
-  sqlite3_blob * blobValue = NULL;
+int vec0_validate_metadata_value(vec0_vtab *p, int metadata_column_idx, sqlite3_value *v) {
   struct Vec0MetadataColumnDefinition * metadata_column = &p->metadata_columns[metadata_column_idx];
   vec0_metadata_column_kind kind = metadata_column->kind;
 
-  // verify input value matches column type
   switch(kind) {
     case VEC0_METADATA_COLUMN_KIND_BOOLEAN: {
       if(sqlite3_value_type(v) != SQLITE_INTEGER || ((sqlite3_value_int(v) != 0) && (sqlite3_value_int(v) != 1))) {
-        rc = SQLITE_ERROR;
         vtab_set_error(&p->base, "Expected 0 or 1 for BOOLEAN metadata column %.*s", metadata_column->name_length, metadata_column->name);
-        goto done;
+        return SQLITE_ERROR;
       }
       break;
     }
     case VEC0_METADATA_COLUMN_KIND_INTEGER: {
       if(sqlite3_value_type(v) != SQLITE_INTEGER) {
-        rc = SQLITE_ERROR;
         vtab_set_error(&p->base, "Expected integer for INTEGER metadata column %.*s, received %s", metadata_column->name_length, metadata_column->name, type_name(sqlite3_value_type(v)));
-        goto done;
+        return SQLITE_ERROR;
       }
       break;
     }
     case VEC0_METADATA_COLUMN_KIND_FLOAT: {
       if(sqlite3_value_type(v) != SQLITE_FLOAT) {
-        rc = SQLITE_ERROR;
         vtab_set_error(&p->base, "Expected float for FLOAT metadata column %.*s, received %s", metadata_column->name_length, metadata_column->name, type_name(sqlite3_value_type(v)));
-        goto done;
+        return SQLITE_ERROR;
       }
       break;
     }
     case VEC0_METADATA_COLUMN_KIND_TEXT: {
       if(sqlite3_value_type(v) != SQLITE_TEXT) {
-        rc = SQLITE_ERROR;
         vtab_set_error(&p->base, "Expected text for TEXT metadata column %.*s, received %s", metadata_column->name_length, metadata_column->name, type_name(sqlite3_value_type(v)));
-        goto done;
+        return SQLITE_ERROR;
       }
       break;
     }
   }
+
+  return SQLITE_OK;
+}
+
+int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid, i64 chunk_id, i64 chunk_offset, sqlite3_value * v, int isupdate) {
+  int rc;
+  sqlite3_blob * blobValue = NULL;
+  rc = vec0_validate_metadata_value(p, metadata_column_idx, v);
+  if(rc != SQLITE_OK) {
+    goto done;
+  }
+  struct Vec0MetadataColumnDefinition * metadata_column = &p->metadata_columns[metadata_column_idx];
+  vec0_metadata_column_kind kind = metadata_column->kind;
 
   rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowMetadataChunksNames[metadata_column_idx], "data", chunk_id, 1, &blobValue);
   if(rc != SQLITE_OK) {
@@ -10258,6 +10394,43 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     goto cleanup;
   }
 
+  // Validate metadata before any rowid, chunk, or vector writes so a rejected
+  // INSERT cannot leave a partially written row behind.
+  for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
+    if (p->user_column_kinds[i] != SQLITE_VEC0_USER_COLUMN_KIND_METADATA) {
+      continue;
+    }
+    int metadata_idx = p->user_column_idxs[i];
+    sqlite3_value *value = argv[2 + VEC0_COLUMN_USERN_START + i];
+    rc = vec0_validate_metadata_value(p, metadata_idx, value);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+  }
+
+  // The same for auxiliary column types, which used to be checked only after
+  // the _rowids, _chunks and vector writes.
+  for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
+    if (p->user_column_kinds[i] != SQLITE_VEC0_USER_COLUMN_KIND_AUXILIARY) {
+      continue;
+    }
+    int auxiliary_idx = p->user_column_idxs[i];
+    sqlite3_value *v = argv[2 + VEC0_COLUMN_USERN_START + i];
+    int v_type = sqlite3_value_type(v);
+    if (v_type != SQLITE_NULL && v_type != p->auxiliary_columns[auxiliary_idx].type) {
+      rc = SQLITE_CONSTRAINT;
+      vtab_set_error(
+        pVTab,
+        "Auxiliary column type mismatch: The auxiliary column %.*s has type %s, but %s was provided.",
+        p->auxiliary_columns[auxiliary_idx].name_length,
+        p->auxiliary_columns[auxiliary_idx].name,
+        type_name(p->auxiliary_columns[auxiliary_idx].type),
+        type_name(v_type)
+      );
+      goto cleanup;
+    }
+  }
+
   // Handle INSERT OR REPLACE: if the conflict resolution is REPLACE and the
   // row already exists, delete the existing row first before inserting.
   if (sqlite3_vtab_on_conflict(p->db) == SQLITE_REPLACE) {
@@ -10352,20 +10525,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       }
       int auxiliary_key_idx = p->user_column_idxs[i];
       sqlite3_value * v = argv[2+VEC0_COLUMN_USERN_START + i];
-      int v_type = sqlite3_value_type(v);
-      if(v_type != SQLITE_NULL && (v_type != p->auxiliary_columns[auxiliary_key_idx].type)) {
-        sqlite3_finalize(stmt);
-        rc = SQLITE_CONSTRAINT;
-        vtab_set_error(
-          pVTab,
-          "Auxiliary column type mismatch: The auxiliary column %.*s has type %s, but %s was provided.",
-          p->auxiliary_columns[auxiliary_key_idx].name_length,
-          p->auxiliary_columns[auxiliary_key_idx].name,
-          type_name(p->auxiliary_columns[auxiliary_key_idx].type),
-          type_name(v_type)
-        );
-        goto cleanup;
-      }
+      // the type was validated above, before any shadow table was written
       // first 1 is for 1-based indexing on sqlite3_bind_*, second 1 is to account for initial rowid parameter
       sqlite3_bind_value(stmt, 1 + 1 + auxiliary_key_idx, v);
     }
@@ -11034,6 +11194,29 @@ cleanup:
   return SQLITE_OK;
 }
 
+// Whether two values have the same type and the same contents. Only the types
+// a partition key can hold (INTEGER, TEXT and NULL) need to match; anything
+// else counts as different.
+static int vec0_values_equal(sqlite3_value *a, sqlite3_value *b) {
+  int type = sqlite3_value_type(a);
+  if (type != sqlite3_value_type(b)) {
+    return 0;
+  }
+  switch (type) {
+    case SQLITE_NULL:
+      return 1;
+    case SQLITE_INTEGER:
+      return sqlite3_value_int64(a) == sqlite3_value_int64(b);
+    case SQLITE_TEXT: {
+      int n = sqlite3_value_bytes(a);
+      return n == sqlite3_value_bytes(b) &&
+             memcmp(sqlite3_value_text(a), sqlite3_value_text(b), n) == 0;
+    }
+    default:
+      return 0;
+  }
+}
+
 int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
   UNUSED_PARAMETER(argc);
   vec0_vtab *p = (vec0_vtab *)pVTab;
@@ -11058,12 +11241,43 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
     }
   } else {
     rowid = sqlite3_value_int64(argv[0]);
+    // vec0 declares a visible "rowid" (or integer primary key) column, so
+    // `UPDATE t SET rowid = 9` reaches xUpdate as that column's new value in
+    // argv[2 + VEC0_COLUMN_ID], while SQLite keeps argv[1] equal to argv[0].
+    // Moving a row to another rowid is not implemented, and it used to be
+    // silently ignored while reporting success.
+    sqlite3_value *newId = argv[2 + VEC0_COLUMN_ID];
+    if (sqlite3_value_int64(argv[1]) != rowid ||
+        (!sqlite3_value_nochange(newId) &&
+         (sqlite3_value_type(newId) != SQLITE_INTEGER ||
+          sqlite3_value_int64(newId) != rowid))) {
+      // IMP: V08886_25725
+      vtab_set_error(pVTab,
+                     "UPDATEs on vec0 primary key values are not allowed.");
+      return SQLITE_ERROR;
+    }
   }
 
   // 1) get chunk_id and chunk_offset from _rowids
   rc = vec0_get_chunk_position(p, rowid, NULL, &chunk_id, &chunk_offset);
   if (rc != SQLITE_OK) {
     return rc;
+  }
+
+  // Validate every new metadata value before any shadow table is written, so
+  // a rejected UPDATE cannot leave the row half updated.
+  for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
+    if(p->user_column_kinds[i] != SQLITE_VEC0_USER_COLUMN_KIND_METADATA) {
+      continue;
+    }
+    sqlite3_value * value = argv[2+VEC0_COLUMN_USERN_START + i];
+    if(sqlite3_value_nochange(value)) {
+      continue;
+    }
+    rc = vec0_validate_metadata_value(p, p->user_column_idxs[i], value);
+    if(rc != SQLITE_OK) {
+      return rc;
+    }
   }
 
   // 2) update any partition key values
@@ -11073,6 +11287,17 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
     }
     sqlite3_value * value = argv[2+VEC0_COLUMN_USERN_START + i];
     if(sqlite3_value_nochange(value)) {
+      continue;
+    }
+    // `set part = part`, or the value the row already has, is not a change
+    sqlite3_value * current = NULL;
+    rc = vec0_get_partition_value_for_rowid(p, rowid, p->user_column_idxs[i], &current);
+    if(rc != SQLITE_OK) {
+      return rc;
+    }
+    int same = vec0_values_equal(current, value);
+    sqlite3_value_free(current);
+    if(same) {
       continue;
     }
     vtab_set_error(pVTab, "UPDATE on partition key columns are not supported yet. ");

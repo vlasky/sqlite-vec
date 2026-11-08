@@ -130,8 +130,10 @@ column of another table can differ from SQLite's own comparison.
 ### Partition Key Columns {#partition-keys}
 
 Partition key columns allow one to internally shard a vector indexed based on a
-given key. Any `=` constraint in a `WHERE` clause on a partition key column will 
-restrict the search to that clause.
+given key. Any `=`, `in (...)`, `!=`, `<`, `<=`, `>` or `>=` constraint in a
+`WHERE` clause on a partition key column will restrict the search to the
+matching partitions. A KNN query with `user_id in (1, 2)` returns the `k`
+nearest rows across both partitions together.
 
 For example, say you're performing vector search on a large dataset of
 documents. However, each document belongs to a user, and users can only search

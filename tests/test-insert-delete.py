@@ -1,4 +1,5 @@
 import sqlite3
+import pytest
 import struct
 
 
@@ -521,3 +522,54 @@ def test_delete_one_chunk_of_two_shrinks_pages(tmp_path):
         f"{pages_before} -> {pages_after}"
     )
     db.close()
+
+
+def _shadow_rows(db, table):
+    return {
+        name: db.execute(f'select count(*) from "{name}"').fetchone()[0]
+        for (name,) in db.execute(
+            "select name from sqlite_master where name like ? and name != ? order by name",
+            [table + "\\_%", table],
+        )
+        if "_info" not in name
+    }
+
+
+def test_failed_insert_leaves_no_row(db):
+    # The metadata and auxiliary type checks ran after the _rowids, _chunks
+    # and vector writes, so inside a transaction a rejected INSERT left a
+    # searchable row behind that survived COMMIT.
+    # https://github.com/asg017/sqlite-vec/issues/333
+    db.execute(
+        "create virtual table t using vec0(v float[2], year integer, +note text, chunk_size=8)"
+    )
+    db.execute("insert into t(rowid, v, year, note) values (1, '[1,0]', 2020, 'a')")
+    before = _shadow_rows(db, "t")
+    # the fixture's connection opens a transaction on the first write, which
+    # stays open across the failed statements until the commit below
+    for sql, message in [
+        ("insert into t(rowid, v, year, note) values (2, '[2,0]', 'x', 'b')", "Expected integer for INTEGER metadata column year"),
+        ("insert into t(rowid, v, year, note) values (2, '[2,0]', 2021, 7)", "Auxiliary column type mismatch"),
+        ("insert into t(rowid, v, year) values (2, '[2,0]', 2.5)", "Expected integer for INTEGER metadata column year"),
+    ]:
+        with pytest.raises(sqlite3.Error, match=message):
+            db.execute(sql)
+    db.commit()
+    assert [tuple(r) for r in db.execute("select rowid, year, note from t")] == [(1, 2020, "a")]
+    assert [tuple(r) for r in db.execute("select rowid from t where v match '[2,0]' and k = 5")] == [(1,)]
+    assert _shadow_rows(db, "t") == before
+    # the rowid is free, and the next insert is not shadowed by stale data
+    db.execute("insert into t(rowid, v, year, note) values (2, '[2,0]', 2021, 'b')")
+    assert [tuple(r) for r in db.execute("select rowid, year, note from t where rowid = 2")] == [(2, 2021, "b")]
+    assert [tuple(r) for r in db.execute("select rowid from t where v match '[2,0]' and k = 1")] == [(2,)]
+
+
+def test_failed_update_changes_nothing(db):
+    # auxiliary columns were written before the metadata type check
+    db.execute(
+        "create virtual table t using vec0(v float[2], year integer, +note text, chunk_size=8)"
+    )
+    db.execute("insert into t(rowid, v, year, note) values (1, '[1,0]', 2020, 'a')")
+    with pytest.raises(sqlite3.Error, match="Expected integer for INTEGER metadata column year"):
+        db.execute("update t set note = 'b', year = 'x' where rowid = 1")
+    assert [tuple(r) for r in db.execute("select rowid, year, note from t")] == [(1, 2020, "a")]
