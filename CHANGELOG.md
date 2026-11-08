@@ -2,6 +2,22 @@
 
 All notable changes to this community fork will be documented in this file.
 
+## [Unreleased]
+
+Fixes for open upstream bug reports, checked against this fork and found to apply, plus three open upstream PRs ported as they stand.
+
+### Fixed
+
+- **A failed INSERT no longer leaves a ghost row** (upstream [#333](https://github.com/asg017/sqlite-vec/issues/333), ports upstream PR [#360](https://github.com/asg017/sqlite-vec/pull/360) and extends it to auxiliary columns) - metadata and auxiliary column types are checked before anything is written, so a rejected INSERT inside a transaction no longer leaves a searchable row that survives COMMIT, and a rejected UPDATE no longer writes the auxiliary columns first
+- **`part in (1, 2)` on a partition key returns the k nearest rows overall** (upstream [#142](https://github.com/asg017/sqlite-vec/issues/142)) - the list used to reach xFilter once per value, each returning its own k rows; it is now one `IN (...)` constraint on the chunks query, with the column's affinity and collation, on SQLite 3.38 or later
+- **UPDATE on a partition-keyed table works with any WHERE clause** (upstream [#261](https://github.com/asg017/sqlite-vec/issues/261)) - full-scan and KNN plans handed xUpdate the current partition key as a new value, so every UPDATE that was not `WHERE rowid = ?` failed with "UPDATE on partition key columns are not supported yet"; unchanged vector, partition, auxiliary and metadata columns are now reported as unchanged on every plan
+- **UPDATE and DELETE driven by a KNN query** - `delete from t where v match ? and k = 1` failed with "expected point query plan in vec0Rowid" on tables without a declared primary key column
+- **`UPDATE t SET rowid = 9` is refused** (upstream [#332](https://github.com/asg017/sqlite-vec/issues/332)) - it used to report one changed row and change nothing; moving a row to another rowid is not implemented, and the error now matches the text primary key case
+- **L2 distance for very large and very small float32 differences** (upstream [#334](https://github.com/asg017/sqlite-vec/issues/334), [#335](https://github.com/asg017/sqlite-vec/issues/335)) - the float32 sum of squares overflowed to Inf above about 1.8e19 and underflowed to 0 below about 1e-19, in `vec_distance_l2()` and L2 KNN queries; those sums are redone in double, ordinary vectors keep the same fast path and results
+- **`vec_each()` reads bit vectors least significant bit first** (ports upstream PR [#323](https://github.com/asg017/sqlite-vec/pull/323) by ariannamethod) - matching `vec_to_json()`, `vec_quantize_binary()` and the stored bitmaps; the API reference example is corrected
+- **`vec_distance_l1()` on int8 vectors no longer wraps at 2^31** (upstream [#362](https://github.com/asg017/sqlite-vec/issues/362), ports upstream PR [#365](https://github.com/asg017/sqlite-vec/pull/365) by flysheep-ai) - the sum is 64-bit and the NEON kernel is only used within its 32-bit range; vec0 columns were never affected
+- **Vector column types must match exactly** (ports upstream PR [#310](https://github.com/asg017/sqlite-vec/pull/310) by stumpylog) - `float16[4]`, `floaty[4]` and `bitcoin[8]` were accepted as `float` and `bit` by a prefix match; `float32` stays accepted
+
 ## [0.2.8-alpha] - 2026-10-29
 
 All changes in this release were contributed by MayCXC (Aaron Paterson), several ported from the photostructure fork and also proposed upstream.
