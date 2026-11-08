@@ -7163,10 +7163,12 @@ struct Vec0PartitionIn {
   vec0_collation collation;
   int n;
   // copies of the list's values; for an integer column already given numeric
-  // affinity, as the `=` path gives its value
+  // affinity, as the `=` path gives its value, for a text column already
+  // holding their UTF-8 text
   sqlite3_value **values;
 };
 
+#if COMPILER_SUPPORTS_VTAB_IN
 static void vec0_partition_in_free(void *pIn) {
   struct Vec0PartitionIn *in = (struct Vec0PartitionIn *)pIn;
   if (!in) {
@@ -7179,7 +7181,6 @@ static void vec0_partition_in_free(void *pIn) {
   sqlite3_free(in);
 }
 
-#if COMPILER_SUPPORTS_VTAB_IN
 // Copies the values of an `in (...)` list (an xFilter argv value marked with
 // sqlite3_vtab_in()) into a new Vec0PartitionIn.
 static int vec0_partition_in_new(sqlite3_value *list, int column_type,
@@ -7207,24 +7208,26 @@ static int vec0_partition_in_new(sqlite3_value *list, int column_type,
       }
       in->values = values;
     }
+    // Convert on the live entry, before the copy: a copy has no connection,
+    // and converting one crashed SQLite 3.53. An integer column gets numeric
+    // affinity, as the `=` path gives its value; a text column gets the
+    // UTF-8 text, so a failed conversion is an error here, not a miss later.
+    if (column_type != SQLITE_TEXT) {
+      sqlite3_value_numeric_type(entry);
+    } else {
+      int type = sqlite3_value_type(entry);
+      if ((type == SQLITE_TEXT || type == SQLITE_INTEGER || type == SQLITE_FLOAT) &&
+          !sqlite3_value_text(entry)) {
+        vec0_partition_in_free(in);
+        return SQLITE_NOMEM;
+      }
+    }
     sqlite3_value *copy = sqlite3_value_dup(entry);
     if (!copy) {
       vec0_partition_in_free(in);
       return SQLITE_NOMEM;
     }
     in->values[in->n++] = copy;
-    if (column_type != SQLITE_TEXT) {
-      sqlite3_value_numeric_type(copy);
-    } else {
-      // Make the UTF-8 text now: the copy has no connection, so a failed
-      // conversion later would read as "no match" instead of an error.
-      int type = sqlite3_value_type(copy);
-      if ((type == SQLITE_TEXT || type == SQLITE_INTEGER || type == SQLITE_FLOAT) &&
-          !sqlite3_value_text(copy)) {
-        vec0_partition_in_free(in);
-        return SQLITE_NOMEM;
-      }
-    }
   }
   if (rc != SQLITE_DONE) {
     vec0_partition_in_free(in);
@@ -8914,6 +8917,12 @@ cleanup:
     return rc;
 }
 
+static int vec0_column_vector_from_value(vec0_vtab *p, int vector_idx,
+                                         sqlite3_value *value, void **vector,
+                                         size_t *dimensions,
+                                         enum VectorElementType *elementType,
+                                         vector_cleanup *cleanup, char **pzError);
+
 int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
                    const char *idxStr, int argc, sqlite3_value **argv) {
   assert(argc == (int)((strlen(idxStr)-1) / 4));
@@ -8964,8 +8973,9 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   assert(k_idx >= 0);
 
   // make sure the query vector matches the vector column (type dimensions etc.)
-  rc = vector_from_value(argv[query_idx], &queryVector, &dimensions, &elementType,
-                         &queryVectorCleanup, &pzError);
+  rc = vec0_column_vector_from_value(p, vectorColumnIdx, argv[query_idx], &queryVector,
+                                     &dimensions, &elementType, &queryVectorCleanup,
+                                     &pzError);
 
   if (rc != SQLITE_OK) {
     vtab_set_error(&p->base,
@@ -10305,7 +10315,7 @@ int vec0_validate_metadata_value(vec0_vtab *p, int metadata_column_idx, sqlite3_
 
   switch(kind) {
     case VEC0_METADATA_COLUMN_KIND_BOOLEAN: {
-      if(sqlite3_value_type(v) != SQLITE_INTEGER || ((sqlite3_value_int(v) != 0) && (sqlite3_value_int(v) != 1))) {
+      if(sqlite3_value_type(v) != SQLITE_INTEGER || ((sqlite3_value_int64(v) != 0) && (sqlite3_value_int64(v) != 1))) {
         vtab_set_error(&p->base, "Expected 0 or 1 for BOOLEAN metadata column %.*s", metadata_column->name_length, metadata_column->name);
         return SQLITE_ERROR;
       }
@@ -10469,6 +10479,31 @@ int vec0_write_metadata_value(vec0_vtab *p, int metadata_column_idx, i64 rowid, 
 // Forward declaration: needed for INSERT OR REPLACE handling in vec0Update_Insert
 int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue);
 
+// Reads a vector column's new value. A BLOB with no vector subtype whose size
+// is exactly the column's is the column's own kind of vector: the raw bytes of
+// an int8 or bit vector, which vector_from_value() would read as float32
+// (upstream asg017/sqlite-vec#361), or the stored blob SQLite hands back for a
+// column an UPDATE leaves alone when it cannot flag it as unchanged, as in
+// UPDATE ... FROM. Also used for KNN query vectors. Anything else is parsed as
+// usual.
+static int vec0_column_vector_from_value(vec0_vtab *p, int vector_idx,
+                                         sqlite3_value *value, void **vector,
+                                         size_t *dimensions,
+                                         enum VectorElementType *elementType,
+                                         vector_cleanup *cleanup, char **pzError) {
+  struct VectorColumnDefinition *column = &p->vector_columns[vector_idx];
+  if (sqlite3_value_type(value) == SQLITE_BLOB && sqlite3_value_subtype(value) == 0 &&
+      (size_t)sqlite3_value_bytes(value) == vector_column_byte_size(*column)) {
+    *vector = (void *)sqlite3_value_blob(value);
+    *dimensions = column->dimensions;
+    *elementType = column->element_type;
+    *cleanup = vector_cleanup_noop;
+    *pzError = NULL;
+    return SQLITE_OK;
+  }
+  return vector_from_value(value, vector, dimensions, elementType, cleanup, pzError);
+}
+
 int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
                       sqlite_int64 *pRowid) {
   UNUSED_PARAMETER(argc);
@@ -10532,10 +10567,11 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     sqlite3_value *valueVector = argv[2 + VEC0_COLUMN_USERN_START + i];
     size_t dimensions;
 
-    char *pzError;
+    char *pzError = NULL;
     enum VectorElementType elementType;
-    rc = vector_from_value(valueVector, &vectorDatas[vector_column_idx], &dimensions,
-                           &elementType, &cleanups[vector_column_idx], &pzError);
+    rc = vec0_column_vector_from_value(p, vector_column_idx, valueVector,
+                                       &vectorDatas[vector_column_idx], &dimensions,
+                                       &elementType, &cleanups[vector_column_idx], &pzError);
     if (rc != SQLITE_OK) {
       // IMP: V06519_23358
       vtab_set_error(
@@ -11335,14 +11371,14 @@ int vec0Update_ParseVectorColumn(vec0_vtab *p, int i, sqlite3_value *valueVector
                                  enum VectorElementType *outElementType,
                                  vector_cleanup *outCleanup) {
   int rc;
-  char *pzError;
+  char *pzError = NULL;
   size_t dimensions;
   enum VectorElementType elementType;
-  void *vector;
+  void *vector = NULL;
   vector_cleanup cleanup = vector_cleanup_noop;
   // https://github.com/asg017/sqlite-vec/issues/53
-  rc = vector_from_value(valueVector, &vector, &dimensions, &elementType,
-                         &cleanup, &pzError);
+  rc = vec0_column_vector_from_value(p, i, valueVector, &vector, &dimensions,
+                                     &elementType, &cleanup, &pzError);
   if (rc != SQLITE_OK) {
     // IMP: V15203_32042
     vtab_set_error(
@@ -11441,9 +11477,10 @@ cleanup:
   return SQLITE_OK;
 }
 
-// Whether two values have the same type and the same contents. Only the types
-// a partition key can hold (INTEGER, TEXT and NULL) need to match; anything
-// else counts as different.
+// Whether two values have the same type and the same contents: 1 or 0, or -1
+// when a text could not be converted (out of memory). Only the types a
+// partition key can hold (INTEGER, TEXT and NULL) need to match; anything else
+// counts as different.
 static int vec0_values_equal(sqlite3_value *a, sqlite3_value *b) {
   int type = sqlite3_value_type(a);
   if (type != sqlite3_value_type(b)) {
@@ -11455,9 +11492,13 @@ static int vec0_values_equal(sqlite3_value *a, sqlite3_value *b) {
     case SQLITE_INTEGER:
       return sqlite3_value_int64(a) == sqlite3_value_int64(b);
     case SQLITE_TEXT: {
+      const char *za = (const char *)sqlite3_value_text(a);
+      const char *zb = (const char *)sqlite3_value_text(b);
+      if (!za || !zb) {
+        return -1;
+      }
       int n = sqlite3_value_bytes(a);
-      return n == sqlite3_value_bytes(b) &&
-             memcmp(sqlite3_value_text(a), sqlite3_value_text(b), n) == 0;
+      return n == sqlite3_value_bytes(b) && memcmp(za, zb, n) == 0;
     }
     default:
       return 0;
@@ -11587,6 +11628,9 @@ int vec0Update_Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv) {
     }
     int same = vec0_values_equal(current, value);
     sqlite3_value_free(current);
+    if(same < 0) {
+      return SQLITE_NOMEM;
+    }
     if(same) {
       continue;
     }

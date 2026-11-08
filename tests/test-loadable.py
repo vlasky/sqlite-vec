@@ -3231,3 +3231,36 @@ def test_vec0_update_validates_before_writing():
     assert execute_all(db, "select rowid, vec_to_json(a) as a, note, year from t_upd") == [
         {"rowid": 1, "a": "[1.000000,1.000000]", "note": "n", "year": 2020}
     ]
+
+
+def test_vec0_raw_blob_takes_column_type():
+    # a BLOB without a vector subtype whose size matches the column is that
+    # column's kind of vector; vector_from_value() alone reads any plain blob
+    # as float32 (https://github.com/asg017/sqlite-vec/issues/361)
+    db.execute("create virtual table t_raw using vec0(a int8[4], b bit[16], n integer)")
+    db.execute("insert into t_raw(rowid, a, b, n) values (1, ?, ?, 0)", [bytes([1, 2, 255, 128]), bytes([0b00000101, 0b10000000])])
+    assert execute_all(db, "select vec_to_json(a) as a, vec_to_json(b) as b from t_raw") == [
+        {"a": "[1,2,-1,-128]", "b": "[1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1]"}
+    ]
+    assert execute_all(db, "select rowid from t_raw where a match ? and k = 1", [bytes([1, 2, 255, 128])]) == [{"rowid": 1}]
+    # the wrong size is still parsed as before and rejected
+    with _raises("Inserted vector for the \"a\" column is invalid: invalid float32 vector BLOB length. Must be divisible by 4, found 3"):
+        db.execute("insert into t_raw(rowid, a, b, n) values (2, ?, ?, 0)", [bytes([1, 2, 3]), bytes([0, 0])])
+    with _raises("Dimension mismatch for inserted vector for the \"a\" column. Expected 4 dimensions but received 2."):
+        db.execute("insert into t_raw(rowid, a, b, n) values (2, ?, ?, 0)", [bytes(8), bytes([0, 0])])
+    # UPDATE ... FROM cannot flag the vector columns as unchanged, so their
+    # stored blobs come back as plain blobs and must round-trip
+    db.execute("create table ids(id integer primary key)")
+    db.execute("insert into ids values (1)")
+    db.execute("update t_raw set n = 1 from ids where t_raw.rowid = ids.id")
+    assert execute_all(db, "select vec_to_json(a) as a, vec_to_json(b) as b, n from t_raw") == [
+        {"a": "[1,2,-1,-128]", "b": "[1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,1]", "n": 1}
+    ]
+
+
+def test_vec0_boolean_full_range():
+    db.execute("create virtual table t_bool using vec0(a float[1], flag boolean)")
+    db.execute("insert into t_bool(a, flag) values ('[1]', 1)")
+    for value in [2, -1, 4294967296, 4294967297]:
+        with _raises("Expected 0 or 1 for BOOLEAN metadata column flag"):
+            db.execute("insert into t_bool(a, flag) values ('[1]', ?)", [value])
