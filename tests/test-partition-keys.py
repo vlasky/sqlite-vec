@@ -176,6 +176,10 @@ def vec0_shadow_table_contents(db, v):
     return o
 
 
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 38, 0),
+    reason="partition IN lists need sqlite3_vtab_in(), SQLite 3.38",
+)
 def test_in_list(db):
     # `part in (...)` used to reach xFilter once per listed value, each call
     # returning its own k nearest, so a query asked for k rows and got k per
@@ -275,6 +279,10 @@ def test_update_without_point_lookup(db):
     assert rows() == [(1, 1, 3, "x"), (2, 2, 4, "n"), (3, 3, 3, "x"), (4, 4, 4, "n")]
 
 
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 38, 0),
+    reason="partition IN lists need sqlite3_vtab_in(), SQLite 3.38",
+)
 def test_in_list_long(db):
     # the list goes into the chunks query as literals, so it is not subject
     # to SQLITE_LIMIT_VARIABLE_NUMBER (32,766 by default)
@@ -287,3 +295,35 @@ def test_in_list_long(db):
     assert [r[0] for r in db.execute(f"select rowid from v where a match '[0]' and k = 3 and part in ({many})")] == [1, 2, 3]
     assert [r[0] for r in db.execute(f"select rowid from v where a match '[0]' and k = 3 and s in ({many})")] == [1, 2, 3]
     assert [r[0] for r in db.execute(f"select rowid from v where a match '[0]' and k = 3 and part in ({many}) and s in ({many})")] == [1, 2, 3]
+
+
+@pytest.mark.skipif(
+    sqlite3.sqlite_version_info < (3, 38, 0),
+    reason="partition IN lists need sqlite3_vtab_in(), SQLite 3.38",
+)
+def test_in_list_awkward_values(db):
+    # the list values are copied and compared in C, so text with embedded NUL
+    # bytes keeps its length, very long values do not lengthen the chunks SQL,
+    # and a lowered SQL length limit does not matter
+    db.execute(
+        "create virtual table v using vec0(part integer partition key, s text partition key, a float[1], chunk_size=8)"
+    )
+    rows = [(1, 1, "a"), (2, 2, "a\x00b"), (3, 3, "A\x00B"), (4, 4, "a\x00b  "), (5, 5, "x" * 4000)]
+    for rowid, part, s in rows:
+        db.execute("insert into v(rowid, part, s, a) values (?, ?, ?, ?)", [rowid, part, s, f"[{rowid}]"])
+    db.execute("create table plain(id integer primary key, part integer, s text)")
+    db.executemany("insert into plain values (?, ?, ?)", rows)
+    db.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 2000)
+
+    def rowids(sql, parameters):
+        return sorted(row[0] for row in db.execute(sql, parameters))
+
+    mismatches = []
+    for where in ["s in (?, ?)", "s collate nocase in (?, ?)", "s collate rtrim in (?, ?)", "part in (?, ?)"]:
+        for values in [("a\x00b", "zz"), ("a\x00b", "a"), ("A\x00B  ", "a"), ("x" * 4000, "a\x00b"), (1, "x" * 4000), (2.0, "3")]:
+            want = rowids(f"select id from plain where {where}", values)
+            got = rowids(f"select rowid from v where a match '[0]' and k = 10 and {where}", values)
+            if got != want:
+                mismatches.append((where, values, got, want))
+    assert mismatches == []
+    assert rowids("select rowid from v where a match '[0]' and k = 10 and s in (?, ?)", ["a\x00b", "a"]) == [1, 2]

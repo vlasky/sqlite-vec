@@ -710,8 +710,8 @@ static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
   // squaring one below about 1e-19 gives a subnormal with few significant
   // bits. Subnormal terms only matter when the whole sum is below
   // 2^24 * FLT_MIN, so sums under that bound, and Inf, are redone in double.
-  // Ordinary vectors never take this path; identical ones (sum == 0) do,
-  // harmlessly. Reported upstream as asg017/sqlite-vec#334 and #335.
+  // Ordinary vectors never take this path; identical ones (sum == 0) are
+  // recognised below. Reported upstream as asg017/sqlite-vec#334 and #335.
   if (!(sum >= 16777216.0f * FLT_MIN) || sum == INFINITY) {
     // identical vectors, the common way to a zero sum, need no second pass
     if (sum == 0 && memcmp(a, b, qty * sizeof(f32)) == 0) {
@@ -7055,6 +7055,127 @@ int vec0_get_metadata_text_long_value(
  * @param outStmt - output sqlite3_stmt of chunks with all filters applied
  * @return int SQLITE_OK on success, error code otherwise
  */
+// The values of a `part in (...)` KNN constraint, handed to the chunks query
+// through sqlite3_bind_pointer() and tested by vec0_partition_in().
+#define VEC0_PARTITION_IN_POINTER "vec0_partition_in"
+struct Vec0PartitionIn {
+  // SQLITE_INTEGER or SQLITE_TEXT, the partition key's declared type
+  int column_type;
+  vec0_collation collation;
+  int n;
+  // copies of the list's values; for an integer column already given numeric
+  // affinity, as the `=` path gives its value
+  sqlite3_value **values;
+};
+
+static void vec0_partition_in_free(void *pIn) {
+  struct Vec0PartitionIn *in = (struct Vec0PartitionIn *)pIn;
+  if (!in) {
+    return;
+  }
+  for (int i = 0; i < in->n; i++) {
+    sqlite3_value_free(in->values[i]);
+  }
+  sqlite3_free(in->values);
+  sqlite3_free(in);
+}
+
+#if COMPILER_SUPPORTS_VTAB_IN
+// Copies the values of an `in (...)` list (an xFilter argv value marked with
+// sqlite3_vtab_in()) into a new Vec0PartitionIn.
+static int vec0_partition_in_new(sqlite3_value *list, int column_type,
+                                 vec0_collation collation,
+                                 struct Vec0PartitionIn **out) {
+  int rc;
+  struct Vec0PartitionIn *in = sqlite3_malloc(sizeof(*in));
+  if (!in) {
+    return SQLITE_NOMEM;
+  }
+  memset(in, 0, sizeof(*in));
+  in->column_type = column_type;
+  in->collation = collation;
+  int capacity = 0;
+  sqlite3_value *entry = NULL;
+  for (rc = sqlite3_vtab_in_first(list, &entry); rc == SQLITE_OK && entry;
+       rc = sqlite3_vtab_in_next(list, &entry)) {
+    if (in->n == capacity) {
+      capacity = capacity ? capacity * 2 : 16;
+      sqlite3_value **values =
+          sqlite3_realloc64(in->values, (sqlite3_uint64)capacity * sizeof(*values));
+      if (!values) {
+        vec0_partition_in_free(in);
+        return SQLITE_NOMEM;
+      }
+      in->values = values;
+    }
+    sqlite3_value *copy = sqlite3_value_dup(entry);
+    if (!copy) {
+      vec0_partition_in_free(in);
+      return SQLITE_NOMEM;
+    }
+    if (column_type != SQLITE_TEXT) {
+      sqlite3_value_numeric_type(copy);
+    }
+    in->values[in->n++] = copy;
+  }
+  if (rc != SQLITE_DONE) {
+    vec0_partition_in_free(in);
+    return rc;
+  }
+  *out = in;
+  return SQLITE_OK;
+}
+#endif
+
+// defined with the metadata filters below
+static int vec0_text_compare(vec0_collation collation, int encoding,
+                             const char *a, int na, const char *b, int nb);
+static int vec0_value_as_i64(sqlite3_value *value, i64 *out);
+
+// vec0_partition_in(set, value): whether a stored partition key value is in
+// the set bound as a pointer by vec0_chunks_iter(). Internal to the chunks
+// query of KNN searches; 0 for anything else.
+//
+// The comparisons are the ones `partition%02d [COLLATE x] = ?` makes on the
+// untyped chunks column with the `=` path's binding: an integer column holds
+// INTEGER or NULL and equals an INTEGER, or a REAL without a fraction; a text
+// column holds TEXT or NULL and equals a TEXT, or a number's text, under the
+// constraint's collation. Equality under BINARY does not depend on the
+// database's text encoding, so the UTF-8 texts are compared.
+static void vec0_partition_in_func(sqlite3_context *context, int argc,
+                                   sqlite3_value **argv) {
+  UNUSED_PARAMETER(argc);
+  struct Vec0PartitionIn *in = sqlite3_value_pointer(argv[0], VEC0_PARTITION_IN_POINTER);
+  sqlite3_value *stored = argv[1];
+  int match = 0;
+  if (!in) {
+    sqlite3_result_int(context, 0);
+    return;
+  }
+  if (in->column_type == SQLITE_TEXT) {
+    if (sqlite3_value_type(stored) == SQLITE_TEXT) {
+      const char *a = (const char *)sqlite3_value_text(stored);
+      int na = sqlite3_value_bytes(stored);
+      for (int i = 0; i < in->n && !match; i++) {
+        int type = sqlite3_value_type(in->values[i]);
+        if (type != SQLITE_TEXT && type != SQLITE_INTEGER && type != SQLITE_FLOAT) {
+          continue;
+        }
+        const char *b = (const char *)sqlite3_value_text(in->values[i]);
+        int nb = sqlite3_value_bytes(in->values[i]);
+        match = a && b && vec0_text_compare(in->collation, SQLITE_UTF8, a, na, b, nb) == 0;
+      }
+    }
+  } else if (sqlite3_value_type(stored) == SQLITE_INTEGER) {
+    i64 x = sqlite3_value_int64(stored);
+    for (int i = 0; i < in->n && !match; i++) {
+      i64 y;
+      match = vec0_value_as_i64(in->values[i], &y) && y == x;
+    }
+  }
+  sqlite3_result_int(context, match);
+}
+
 // Binds one partition key constraint value to the chunks statement with the
 // affinity of its partition column, as SQLite would apply it.
 static void vec0_chunks_iter_bind_partition_value(vec0_vtab *p, sqlite3_stmt *stmt, int n,
@@ -7123,70 +7244,14 @@ int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value
       sqlite3_str_appendf(s, " partition%02d != ? ", partition_idx);
       break;
 #if COMPILER_SUPPORTS_VTAB_IN
-     case VEC0_PARTITION_OPERATOR_IN: {
-      // The list values go into the SQL as literals rather than parameters:
-      // a long `in (select ...)` list would otherwise run into
-      // SQLITE_LIMIT_VARIABLE_NUMBER. Each literal gets the column's type, as
-      // the `=` binding below gives its value, so values that can never match
-      // a stored value (NULL, blobs, non-integral numbers on an integer
-      // column) are left out. The collation goes on the column, where it
-      // applies to each comparison, not after the list.
-      sqlite3_value *entry = NULL;
-      int n = 0;
-      sqlite3_str *list = sqlite3_str_new(NULL);
-      for (rc = sqlite3_vtab_in_first(argv[i], &entry); rc == SQLITE_OK && entry;
-           rc = sqlite3_vtab_in_next(argv[i], &entry)) {
-        int type = sqlite3_value_type(entry);
-        if (type == SQLITE_NULL || type == SQLITE_BLOB) {
-          continue;
-        }
-        if (p->paritition_columns[partition_idx].type == SQLITE_TEXT) {
-          sqlite3_str_appendf(list, "%s%Q", n ? "," : "", sqlite3_value_text(entry));
-          n++;
-          continue;
-        }
-        type = sqlite3_value_numeric_type(entry);
-        if (type == SQLITE_INTEGER) {
-          sqlite3_str_appendf(list, "%s%lld", n ? "," : "", sqlite3_value_int64(entry));
-          n++;
-        } else if (type == SQLITE_FLOAT) {
-          double r = sqlite3_value_double(entry);
-          // only an integral value can equal a stored integer
-          if (r >= -9223372036854775808.0 && r < 9223372036854775808.0 &&
-              r == (double)(i64)r) {
-            sqlite3_str_appendf(list, "%s%lld", n ? "," : "", (i64)r);
-            n++;
-          }
-        } else {
-          sqlite3_str_appendf(list, "%s%Q", n ? "," : "", sqlite3_value_text(entry));
-          n++;
-        }
-      }
-      // sqlite3_str_finish() returns NULL for an empty list as well as on
-      // error, so the error code is read first
-      int listRc = sqlite3_str_errcode(list);
-      char *zList = sqlite3_str_finish(list);
-      if (rc != SQLITE_DONE || listRc != SQLITE_OK) {
-        sqlite3_free(zList);
-        char * zSql = sqlite3_str_finish(s);
-        sqlite3_free(zSql);
-        return rc != SQLITE_DONE ? rc : listRc;
-      }
-      if (n == 0) {
-        // nothing listed that could match
-        sqlite3_str_appendall(s, " 0 ");
-      } else {
-        sqlite3_str_appendf(s, " partition%02d ", partition_idx);
-        if(collation == VEC0_COLLATION_NOCASE) {
-          sqlite3_str_appendall(s, "COLLATE NOCASE ");
-        } else if(collation == VEC0_COLLATION_RTRIM) {
-          sqlite3_str_appendall(s, "COLLATE RTRIM ");
-        }
-        sqlite3_str_appendf(s, "IN (%s) ", zList);
-      }
-      sqlite3_free(zList);
+     case VEC0_PARTITION_OPERATOR_IN:
+      // The list is tested in C by vec0_partition_in(), which gets the copied
+      // values through sqlite3_bind_pointer() below: no parameter or literal
+      // per value, so the SQL stays short, no SQL limit applies to the list,
+      // and text with embedded NUL bytes keeps its length. The collation
+      // travels with the values.
+      sqlite3_str_appendf(s, " vec0_partition_in(?, partition%02d) ", partition_idx);
       continue;
-     }
 #endif
      default: {
       char * zSql = sqlite3_str_finish(s);
@@ -7227,7 +7292,18 @@ int vec0_chunks_iter(vec0_vtab * p, const char * idxStr, int argc, sqlite3_value
     int operator = idxStr[idx + 2];
 #if COMPILER_SUPPORTS_VTAB_IN
     if (operator == VEC0_PARTITION_OPERATOR_IN) {
-      // the list went into the SQL as literals above
+      vec0_collation collation = idxStr[idx + 3];
+      struct Vec0PartitionIn *in = NULL;
+      rc = vec0_partition_in_new(argv[i], p->paritition_columns[partition_idx].type,
+                                 collation, &in);
+      if (rc != SQLITE_OK) {
+        sqlite3_finalize(*outStmt);
+        *outStmt = NULL;
+        return rc;
+      }
+      // the statement owns the set from here, and frees it when finalized
+      sqlite3_bind_pointer(*outStmt, n++, in, VEC0_PARTITION_IN_POINTER,
+                           vec0_partition_in_free);
       continue;
     }
 #else
@@ -12723,6 +12799,7 @@ SQLITE_VEC_API int sqlite3_vec_init(sqlite3 *db, char **pzErrMsg,
     //{"vec_version",         _static_text_func,    0, DEFAULT_FLAGS,                                          (void *) SQLITE_VEC_VERSION },
     //{"vec_debug",           _static_text_func,    0, DEFAULT_FLAGS,                                          (void *) SQLITE_VEC_DEBUG_STRING },
     {"vec_distance_l2",     vec_distance_l2,      2, DEFAULT_FLAGS | SQLITE_SUBTYPE,                         },
+    {"vec0_partition_in",   vec0_partition_in_func, 2, DEFAULT_FLAGS,                                        },
     {"vec_distance_l1",     vec_distance_l1,      2, DEFAULT_FLAGS | SQLITE_SUBTYPE,                         },
     {"vec_distance_hamming",vec_distance_hamming, 2, DEFAULT_FLAGS | SQLITE_SUBTYPE,                         },
     {"vec_distance_cosine", vec_distance_cosine,  2, DEFAULT_FLAGS | SQLITE_SUBTYPE,                         },
