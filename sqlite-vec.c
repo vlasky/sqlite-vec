@@ -170,12 +170,13 @@ enum VectorElementType {
 
 #ifdef SQLITE_VEC_ENABLE_AVX
 #include <immintrin.h>
-#ifdef _MSC_VER
+#if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
 #define PORTABLE_ALIGN32 __declspec(align(32))
 #define PORTABLE_ALIGN64 __declspec(align(64))
-// MSVC compiles AVX intrinsics in any function whatever /arch says, so the
-// kernels need no attribute, and it has no __builtin_cpu_supports().
+// Native MSVC compiles AVX intrinsics in any function whatever /arch says,
+// so the kernels need no attribute, and it has no __builtin_cpu_supports().
+// (clang-cl defines _MSC_VER too but takes the GCC/Clang branch below.)
 #define VEC_TARGET_AVX
 #define VEC_TARGET_AVX2
 static int vec_cpu_supports_avx(int avx2) {
@@ -203,14 +204,28 @@ static int vec_cpu_supports_avx(int avx2) {
   __cpuidex(info, 7, 0);
   return (info[1] >> 5) & 1;
 }
-#define VEC_CPU_SUPPORTS_AVX() vec_cpu_supports_avx(0)
-#define VEC_CPU_SUPPORTS_AVX2() vec_cpu_supports_avx(1)
+// cpuid is slow, so the answer is cached once per feature. The cache is a
+// LONG written with an interlocked exchange: several threads may run the
+// first distance calls at once on different connections.
+static int vec_cpu_feature_cached(volatile long *cache, int avx2) {
+  long value = *cache;
+  if (value < 0) {
+    value = vec_cpu_supports_avx(avx2);
+    _InterlockedExchange(cache, value);
+  }
+  return (int)value;
+}
+static volatile long vec_cpu_has_avx = -1;
+static volatile long vec_cpu_has_avx2 = -1;
+#define VEC_CPU_SUPPORTS_AVX() vec_cpu_feature_cached(&vec_cpu_has_avx, 0)
+#define VEC_CPU_SUPPORTS_AVX2() vec_cpu_feature_cached(&vec_cpu_has_avx2, 1)
 #else
 #define PORTABLE_ALIGN32 __attribute__((aligned(32)))
 #define PORTABLE_ALIGN64 __attribute__((aligned(64)))
 // Only the kernels are compiled for AVX, through their target attribute, and
 // they run only when the CPU supports them, so the file needs no -mavx and
-// the same binary runs on any x86-64 CPU.
+// the same binary runs on any x86-64 CPU. __builtin_cpu_supports() reads a
+// table the runtime fills in before main(), so it needs no cache here.
 #define VEC_TARGET_AVX __attribute__((target("avx")))
 #define VEC_TARGET_AVX2 __attribute__((target("avx2")))
 #define VEC_CPU_SUPPORTS_AVX() __builtin_cpu_supports("avx")
@@ -326,7 +341,7 @@ static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
   const i8 *pEnd1 = pVect1 + qty;
   i64 sum_scalar = 0;
 
-  while (pVect1 < pEnd1 - 7) {
+  while (pEnd1 - pVect1 > 7) {
     // loading 8 at a time
     int8x8_t v1 = vld1_s8(pVect1);
     int8x8_t v2 = vld1_s8(pVect2);
@@ -373,7 +388,7 @@ static i32 l1_int8_neon(const void *pVect1v, const void *pVect2v,
 
   // vabdq_s8 returns |a - b| (up to 255) in signed lanes, so each difference
   // is reinterpreted as unsigned before the widening pairwise adds
-  while (pVect1 < pEnd1 - 63) {
+  while (pEnd1 - pVect1 > 63) {
     int8x16_t v1 = vld1q_s8(pVect1);
     int8x16_t v2 = vld1q_s8(pVect2);
     uint8x16_t diff1 = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
@@ -402,7 +417,7 @@ static i32 l1_int8_neon(const void *pVect1v, const void *pVect2v,
     pVect2 += 64;
   }
 
-  while (pVect1 < pEnd1 - 15) {
+  while (pEnd1 - pVect1 > 15) {
     int8x16_t v1 = vld1q_s8(pVect1);
     int8x16_t v2 = vld1q_s8(pVect2);
     uint8x16_t diff = vreinterpretq_u8_s8(vabdq_s8(v1, v2));
@@ -434,7 +449,7 @@ static double l1_f32_neon(const void *pVect1v, const void *pVect2v,
   const f32 *pEnd1 = pVect1 + qty;
   float64x2_t acc = vdupq_n_f64(0);
 
-  while (pVect1 < pEnd1 - 3) {
+  while (pEnd1 - pVect1 > 3) {
     float32x4_t v1 = vld1q_f32(pVect1);
     float32x4_t v2 = vld1q_f32(pVect2);
     pVect1 += 4;
@@ -738,20 +753,13 @@ static double l2_sqr_float_double(const f32 *a, const f32 *b, size_t qty) {
 static f32 distance_l2_sqr_float(const void *a, const void *b, const void *d) {
   size_t qty = *(const size_t *)d;
   f32 sum;
-#ifdef SQLITE_VEC_ENABLE_AVX
-  // checked once; a second thread repeating the check writes the same value
-  static int has_avx = -1;
-  if (has_avx < 0) {
-    has_avx = VEC_CPU_SUPPORTS_AVX();
-  }
-#endif
 #ifdef SQLITE_VEC_ENABLE_NEON
   if (qty > 16) {
     sum = l2_sqr_float_neon(a, b, d);
   } else
 #endif
 #ifdef SQLITE_VEC_ENABLE_AVX
-  if (has_avx && qty % 16 == 0) {
+  if (qty % 16 == 0 && VEC_CPU_SUPPORTS_AVX()) {
     sum = l2_sqr_float_avx(a, b, d);
   } else
 #endif
@@ -1017,7 +1025,7 @@ static f32 distance_hamming_neon(const u8 *a, const u8 *b, size_t n_bytes) {
   uint32x4_t acc3 = vdupq_n_u32(0);
   uint32x4_t acc4 = vdupq_n_u32(0);
 
-  while (a <= pEnd - 64) {
+  while (pEnd - a >= 64) {
     uint8x16_t v1 = vld1q_u8(a);
     uint8x16_t v2 = vld1q_u8(b);
     acc1 = vaddq_u32(acc1, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
@@ -1038,7 +1046,7 @@ static f32 distance_hamming_neon(const u8 *a, const u8 *b, size_t n_bytes) {
     b += 64;
   }
 
-  while (a <= pEnd - 16) {
+  while (pEnd - a >= 16) {
     uint8x16_t v1 = vld1q_u8(a);
     uint8x16_t v2 = vld1q_u8(b);
     acc1 = vaddq_u32(acc1, vpaddlq_u16(vpaddlq_u8(vcntq_u8(veorq_u8(v1, v2)))));
@@ -1078,7 +1086,7 @@ static f32 distance_hamming_avx2(const u8 *a, const u8 *b, size_t n_bytes) {
 
   __m256i acc = _mm256_setzero_si256();
 
-  while (a <= pEnd - 32) {
+  while (pEnd - a >= 32) {
     __m256i va = _mm256_loadu_si256((const __m256i *)a);
     __m256i vb = _mm256_loadu_si256((const __m256i *)b);
     __m256i xored = _mm256_xor_si256(va, vb);
@@ -1144,11 +1152,7 @@ static f32 distance_hamming(const void *a, const void *b, const void *d) {
   }
 #endif
 #ifdef SQLITE_VEC_ENABLE_AVX
-  static int has_avx2 = -1;
-  if (has_avx2 < 0) {
-    has_avx2 = VEC_CPU_SUPPORTS_AVX2();
-  }
-  if (has_avx2 && n_bytes >= 32) {
+  if (n_bytes >= 32 && VEC_CPU_SUPPORTS_AVX2()) {
     return distance_hamming_avx2((const u8 *)a, (const u8 *)b, n_bytes);
   }
 #endif
