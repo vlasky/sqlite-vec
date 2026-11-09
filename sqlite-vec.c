@@ -7208,10 +7208,12 @@ static int vec0_partition_in_new(sqlite3_value *list, int column_type,
       }
       in->values = values;
     }
-    // Convert on the live entry, before the copy: a copy has no connection,
-    // and converting one crashed SQLite 3.53. An integer column gets numeric
-    // affinity, as the `=` path gives its value; a text column gets the
-    // UTF-8 text, so a failed conversion is an error here, not a miss later.
+    // Convert on the live entry, before the copy. A copy has no connection,
+    // and sqlite3_value_numeric_type() in SQLite 3.53.0 and 3.53.1 locks
+    // pMem->db->mutex without checking for NULL (THREADSAFE builds crash;
+    // 3.54.0 adds the check). An integer column gets numeric affinity, as
+    // the `=` path gives its value; a text column gets the UTF-8 text, so a
+    // failed conversion is an error here, not a miss later.
     if (column_type != SQLITE_TEXT) {
       sqlite3_value_numeric_type(entry);
     } else {
