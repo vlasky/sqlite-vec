@@ -2,14 +2,14 @@
 
 All notable changes to this community fork will be documented in this file.
 
-## [Unreleased]
+## [0.2.9-alpha] - 2026-11-09
 
 Fixes for open upstream bug reports, checked against this fork and found to apply, plus three open upstream PRs ported as they stand.
 
 ### Fixed
 
 - **A failed INSERT no longer leaves a ghost row** (upstream [#333](https://github.com/asg017/sqlite-vec/issues/333), ports upstream PR [#360](https://github.com/asg017/sqlite-vec/pull/360) and extends it to auxiliary columns) - metadata and auxiliary column types are checked before anything is written, so a rejected INSERT inside a transaction no longer leaves a searchable row that survives COMMIT; UPDATE likewise checks its new metadata, auxiliary and vector values before it writes anything, so a rejected UPDATE changes nothing
-- **`part in (1, 2)` on a partition key returns the k nearest rows overall** (upstream [#142](https://github.com/asg017/sqlite-vec/issues/142)) - the list used to reach xFilter once per value, each returning its own k rows; it is now one membership test on the chunks query, with the column's affinity and collation, on SQLite 3.38 or later
+- **`part in (1, 2)` on a partition key returns the k nearest rows overall** (upstream [#142](https://github.com/asg017/sqlite-vec/issues/142)) - the list used to reach xFilter once per value, each returning its own k rows; it is now one membership test on the chunks query, with the column's affinity and collation, on SQLite 3.38 or later. The list's values are converted before they are copied: `sqlite3_value_numeric_type()` on a copy dereferences a NULL connection in SQLite 3.53.0 and 3.53.1 THREADSAFE builds (the ones current Python builds ship; fixed in SQLite 3.54.0)
 - **UPDATE on a partition-keyed table works with any WHERE clause** (upstream [#261](https://github.com/asg017/sqlite-vec/issues/261)) - full-scan and KNN plans handed xUpdate the current partition key as a new value, so every UPDATE that was not `WHERE rowid = ?` failed with "UPDATE on partition key columns are not supported yet"; unchanged partition, auxiliary and metadata columns are now reported as unchanged on every plan (vectors keep the existing NULL convention)
 - **UPDATE and DELETE driven by a KNN query** - `delete from t where v match ? and k = 1` failed with "expected point query plan in vec0Rowid" on tables without a declared primary key column
 - **`UPDATE t SET rowid = 9` is refused** (upstream [#332](https://github.com/asg017/sqlite-vec/issues/332)) - it used to report one changed row and change nothing; moving a row to another rowid is not implemented, and the error now matches the text primary key case

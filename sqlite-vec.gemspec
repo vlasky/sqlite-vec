@@ -2,7 +2,7 @@
 
 Gem::Specification.new do |spec|
   spec.name          = "sqlite-vec"
-  spec.version       = "0.2.8.alpha"
+  spec.version       = "0.2.9.alpha"
   spec.authors       = ["Alex Garcia", "Vlad Lasky"]
   spec.email         = ["alex@alex.garcia"]
 
